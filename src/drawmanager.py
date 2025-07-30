@@ -6,6 +6,7 @@ from simple_lama_inpainting import SimpleLama
 from src import config
 import re
 
+
 def create_mask(image, boxes, target_classes, class_names, padding=0):
     """YOLO로 탐지된 객체들의 바운딩 박스를 기반으로 Inpainting 마스크를 생성합니다."""
     mask = np.zeros(image.shape[:2], dtype=np.uint8)

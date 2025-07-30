@@ -6,10 +6,9 @@ import google.generativeai as genai
 import numpy as np
 import tensorflow as tf
 from ultralytics import YOLO
-from manga_ocr import MangaOcr
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor
 from src import config
+from src.batch_manga_ocr import BatchMangaOcr
 
 FONT_CLASS_NAMES = ['bold', 'confused', 'handwriting', 'narration', 'sad', 'shouting', 'standard']
 
@@ -29,7 +28,7 @@ def initialize_models_and_session():
 
     detection_model = YOLO(config.MODEL_PATH)
     detection_model.to(config.DEVICE)
-    ocr_model = MangaOcr()
+    ocr_model = BatchMangaOcr()
 
     try:
         font_classifier_model = tf.keras.models.load_model(config.FONT_CLASSIFIER_PATH)
@@ -143,100 +142,130 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
         return 'none'
 
 
-def structure_page_data(models, image_rgb, page_identifier, detection_results):
-    _, ocr_model, _, font_classifier = models
-    print(f"  -> [{page_identifier}] 탐지 결과 구조화 시작...")
+def process_image_batch(models, batch_images_rgb, batch_paths):
+    """
+    이미지 배치 전체를 받아 탐지, OCR, 구조화, 번역까지 모두 처리하는 통합 함수.
+    """
+    detection_model, ocr_model, chat_session, font_classifier = models
 
-    boxes = detection_results.boxes
-    class_names = detection_results.names
+    # 1. YOLO 일괄 탐지
+    print(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
+    batch_results = detection_model(batch_images_rgb)
 
-    safe_subdir_name = page_identifier.replace('.', '_')
-    page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
-    os.makedirs(page_debug_dir, exist_ok=True)
+    # 2. 모든 페이지의 텍스트 조각(crop)과 원본 정보를 하나의 리스트로 통합
+    all_items_to_process = []
+    all_bubbles_by_page = [[] for _ in batch_images_rgb]
+    for page_idx, (image_rgb, results) in enumerate(zip(batch_images_rgb, batch_results)):
+        page_identifier = os.path.basename(batch_paths[page_idx])
 
-    bubble_boxes = []
-    text_boxes_with_info = []
-    freeform_texts = []
+        # [추가] 페이지별 디버그 폴더 생성
+        safe_subdir_name = page_identifier.replace('.', '_')
+        page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
+        if config.SAVE_DEBUG_CROPS:
+            os.makedirs(page_debug_dir, exist_ok=True)
 
-    # 1. OCR, 폰트 계산/분류 병렬 처리를 위한 작업 목록 생성
-    items_to_process = []
-    for i, box in enumerate(boxes):
-        class_id = int(box.cls[0])
-        class_name = class_names[class_id]
-        coords = box.xyxy[0].cpu().numpy().astype(int)
-        if class_name == 'bubble':
-            bubble_boxes.append(coords)
-        elif class_name in config.TARGET_CLASSES:
-            cropped_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
-            items_to_process.append({'crop': cropped_pil, 'box': coords, 'class_name': class_name, 'crop_idx': i})
+        for i, box in enumerate(results.boxes):
+            class_name = results.names[int(box.cls[0])]
+            coords = box.xyxy[0].cpu().numpy().astype(int)
+            if class_name == 'bubble':
+                all_bubbles_by_page[page_idx].append(coords)
+            elif class_name in config.TARGET_CLASSES:
+                cropped_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
+                if config.SAVE_DEBUG_CROPS:
+                    crop_filename = f"crop_{i}_{class_name}.png"
+                    save_path = os.path.join(page_debug_dir, crop_filename)
+                    cropped_pil.save(save_path)
+                all_items_to_process.append({
+                    'page_idx': page_idx, 'crop': cropped_pil, 'box': coords, 'class_name': class_name
+                })
 
-    def _process_item(item):
-        ocr_text = ocr_model(item['crop'])
+    # 3. MangaOCR 일괄 처리
+    print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 Batch OCR (GPU) 처리 중...")
+    all_ocr_results = ocr_model([item['crop'] for item in all_items_to_process]) if all_items_to_process else []
+
+    # 4. CPU 작업 순차 처리
+    processed_text_items = []
+    print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 순차 처리 중...")
+    for item, ocr_text in zip(all_items_to_process, all_ocr_results):
+        if not ocr_text: continue
+
         font_size = _calculate_font_size(item['crop'])
         font_style = 'standard'
-        if font_classifier and ocr_text:
+        if font_classifier:
             img_array = tf.image.resize(np.array(item['crop']), (96, 96))
             img_array = tf.expand_dims(img_array, 0)
             predictions = font_classifier.predict(img_array, verbose=0)
             font_style = config.FONT_CLASS_NAMES[np.argmax(predictions[0])]
-        return ocr_text, font_size, font_style, item
 
-    # 2. 병렬 처리 실행 및 결과 수집
-    print(f"  -> {len(items_to_process)}개의 텍스트 조각을 병렬 처리 중...")
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(_process_item, items_to_process)
+        base_font_size = font_size if font_size > 0 else (item['box'][3] - item['box'][1])
+        final_font_size = int(max(config.MIN_FONT_SIZE, min(base_font_size, config.MAX_FONT_SIZE)))
 
-    for ocr_text, font_size, font_style, source_item in results:
-        if ocr_text:
-            coords, class_name = source_item['box'], source_item['class_name']
-            if config.SAVE_DEBUG_CROPS:
-                crop_filename = f"crop_{source_item['crop_idx']}_{class_name}.png"
-                source_item['crop'].save(os.path.join(page_debug_dir, crop_filename))
+        processed_text_items.append({
+            'page_idx': item['page_idx'], 'box': item['box'], 'class_name': item['class_name'],
+            'original_text': ocr_text, 'font_size': final_font_size, 'font_style': font_style
+        })
 
-            base_font_size = font_size if font_size > 0 else (coords[3] - coords[1])
-            final_font_size = int(max(config.MIN_FONT_SIZE, min(base_font_size, config.MAX_FONT_SIZE)))
-            item_data = {"original_text": ocr_text, "font_size": final_font_size, "font_style": font_style}
+    # 5. 페이지별로 최종 데이터 구조 조립
+    untranslated_batch_data = []
+    for page_idx, path in enumerate(batch_paths):
+        page_identifier = os.path.basename(path)
+        image_rgb = batch_images_rgb[page_idx]
 
-            if class_name == 'free_text':
-                item_data["text_box"] = coords.tolist()
-                freeform_texts.append(item_data)
-            else:
-                item_data.update({'box': coords})
-                text_boxes_with_info.append(item_data)
+        page_bubbles = all_bubbles_by_page[page_idx]
+        page_texts = [item for item in processed_text_items if
+                      item['page_idx'] == page_idx and item['class_name'] == 'text']
+        page_free_texts = [item for item in processed_text_items if
+                           item['page_idx'] == page_idx and item['class_name'] == 'free_text']
 
-    # 3. 말풍선과 텍스트 1:1 매칭
-    structured_bubbles = []
-    unmatched_text_indices = set(range(len(text_boxes_with_info)))
-    for i, bubble_box in enumerate(bubble_boxes):
-        bubble_center_x, bubble_center_y = (bubble_box[0] + bubble_box[2]) / 2, (bubble_box[1] + bubble_box[3]) / 2
-        closest_text_idx, min_distance = -1, float('inf')
+        # 1:1 매칭 로직
+        structured_bubbles = []
+        unmatched_text_indices = set(range(len(page_texts)))
+        for bubble_box in page_bubbles:
+            bubble_center_x, bubble_center_y = (bubble_box[0] + bubble_box[2]) / 2, (bubble_box[1] + bubble_box[3]) / 2
+            closest_text_idx, min_distance = -1, float('inf')
 
-        for j, text_info in enumerate(text_boxes_with_info):
-            if j in unmatched_text_indices:
-                text_box = text_info['box']
-                text_center_x, text_center_y = (text_box[0] + text_box[2]) / 2, (text_box[1] + text_box[3]) / 2
-                distance = np.sqrt((bubble_center_x - text_center_x) ** 2 + (bubble_center_y - text_center_y) ** 2)
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_text_idx = j
+            for j, text_info in enumerate(page_texts):
+                if j in unmatched_text_indices:
+                    text_box = text_info['box']
+                    text_center_x, text_center_y = (text_box[0] + text_box[2]) / 2, (text_box[1] + text_box[3]) / 2
+                    distance = np.sqrt((bubble_center_x - text_center_x) ** 2 + (bubble_center_y - text_center_y) ** 2)
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_text_idx = j
 
-        if closest_text_idx != -1:
-            matched_text_info = text_boxes_with_info[closest_text_idx]
-            cropped_bubble = image_rgb[bubble_box[1]:bubble_box[3], bubble_box[0]:bubble_box[2]]
+            if closest_text_idx != -1:
+                matched_text_info = page_texts[closest_text_idx]
+                b_x1, b_y1, b_x2, b_y2 = bubble_box
+                cropped_bubble = image_rgb[b_y1:b_y2, b_x1:b_x2]
 
-            current_bubble = {
-                "bubble_box": bubble_box.tolist(),
-                "text_box": matched_text_info['box'].tolist(),
-                "original_text": matched_text_info['original_text'],
-                "font_size": matched_text_info['font_size'],
-                "font_style": matched_text_info['font_style'],
-                "attachment": check_bubble_attachment(cropped_bubble)
-            }
-            structured_bubbles.append(current_bubble)
-            unmatched_text_indices.remove(closest_text_idx)
+                current_bubble = {
+                    "bubble_box": bubble_box, "text_box": matched_text_info['box'],
+                    "original_text": matched_text_info['original_text'], "font_size": matched_text_info['font_size'],
+                    "font_style": matched_text_info['font_style'], "attachment": check_bubble_attachment(cropped_bubble)
+                }
+                structured_bubbles.append(current_bubble)
+                unmatched_text_indices.remove(closest_text_idx)
 
-    print(f"  -> 총 {len(structured_bubbles)}개의 말풍선과 {len(freeform_texts)}개의 자유 텍스트 구조화 완료.")
-    return {"source_page": page_identifier, "speech_bubbles": structured_bubbles, "freeform_texts": freeform_texts}
+        for bubble in structured_bubbles:
+            bubble['bubble_box'] = bubble['bubble_box'].tolist()
+            bubble['text_box'] = bubble['text_box'].tolist()
+
+        for ff_text in page_free_texts:
+            if 'box' in ff_text:
+                ff_text['text_box'] = ff_text['box'].tolist()
+                del ff_text['box']
+
+        untranslated_batch_data.append({
+            "source_page": page_identifier,
+            "speech_bubbles": structured_bubbles,
+            "freeform_texts": page_free_texts
+        })
+
+    # 6. 배치 단위 번역
+    final_batch_data = translate_image_batch(chat_session, untranslated_batch_data)
+
+    return final_batch_data
+
 
 
 def translate_image_batch(chat_session, batch_page_data):

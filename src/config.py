@@ -1,7 +1,7 @@
 import torch
 
 MODEL_PATH = 'data/models/v21.pt'
-INPUT_DIR = 'data/inputs/'
+INPUT_DIR = 'data/inputs2/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
 DEBUG_CROPS_DIR = 'data/debug_crops'

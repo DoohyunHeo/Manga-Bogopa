@@ -40,20 +40,9 @@ def main():
                             cv2.imread(p) is not None]
         if not batch_images_rgb: continue
 
-        print(f"  -> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
-        batch_results = detection_model(batch_images_rgb)
-
-        # --- 3. 페이지별 데이터 구조화 ---
-        untranslated_batch_data = []
-        for (path, image_rgb, results) in zip(batch_paths, batch_images_rgb, batch_results):
-            page_identifier = os.path.basename(path)
-            page_data = extractor.structure_page_data(models, image_rgb, page_identifier, results)
-            untranslated_batch_data.append(page_data)
-
-        if not untranslated_batch_data: continue
-
-        # --- 4. 배치 단위 번역 실행 ---
-        final_batch_data = extractor.translate_image_batch(chat_session, untranslated_batch_data)
+        # --- 3. [변경] 추출 및 번역 일괄 처리 ---
+        # 복잡한 로직을 extractor의 새 함수에 위임
+        final_batch_data = extractor.process_image_batch(models, batch_images_rgb, batch_paths)
         all_final_data.extend(final_batch_data)
 
     # --- 5. 최종 데이터 저장 ---

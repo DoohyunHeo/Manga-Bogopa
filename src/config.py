@@ -10,11 +10,12 @@ TRANSLATION_BATCH_SIZE = 100
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 TARGET_CLASSES = ['bubble', 'text', 'free_text']
 CLASSES_TO_ERASE = ['text', 'free_text']
-GEMINI_MODEL = 'gemini-2.5-pro'
+GEMINI_MODEL = 'gemini-2.0-flash'
 
 BUBBLE_PADDING = 0
 BUBBLE_EDGE_SAFE_MARGIN = 10
-INPAINT_MASK_PADDING = 10
+INPAINT_CONTEXT_PADDING = 50
+INPAINT_MASK_PADDING = 0
 ATTACHED_BUBBLE_TEXT_MARGIN = 5
 BUBBLE_PADDING_RATIO = 0.15
 VERTICAL_TOLERANCE_RATIO = 0.05
@@ -28,6 +29,10 @@ FREEFORM_PADDING_RATIO = 0.05
 FREEFORM_FONT_COLOR = (0, 0, 0)
 FREEFORM_STROKE_COLOR = (255, 255, 255)
 FREEFORM_STROKE_WIDTH = 2
+
+MTL_MODEL_PATH = 'data/models/mtl_text_analyzer_pytorch.pth'
+LABEL_ENCODER_PATH = 'data/models/style_label_encoder.json'
+IMAGE_SIZE = (224, 224)
 
 FONT_MAP = {
     "standard": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/NanumBarunGothic.ttf",

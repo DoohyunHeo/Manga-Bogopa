@@ -1,7 +1,7 @@
 import torch
 
 MODEL_PATH = 'data/models/v21.pt'
-INPUT_DIR = 'data/inputs2/'
+INPUT_DIR = 'data/inputs3/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
 DEBUG_CROPS_DIR = 'data/debug_crops'
@@ -48,6 +48,8 @@ MAX_FONT_SIZE = 50
 DEFAULT_FONT_SIZE = 20
 FONT_UPSCALE_IF_TOO_SMALL = True
 FONT_AREA_FILL_RATIO = 0.35
+
+OCR_BATCH_SIZE=64
 
 
 SAVE_DEBUG_CROPS=True

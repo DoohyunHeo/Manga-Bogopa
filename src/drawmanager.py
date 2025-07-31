@@ -1,8 +1,9 @@
 import numpy as np
 import cv2
+import torch
 from PIL import Image, ImageDraw, ImageFont
+from torchvision.transforms.functional import to_tensor, to_pil_image
 from math import sqrt
-from simple_lama_inpainting import SimpleLama
 from src import config
 import re
 
@@ -21,16 +22,93 @@ def create_mask(image, boxes, target_classes, class_names, padding=0):
     return mask
 
 
-def erase_text_with_lama(image_rgb, mask):
-    """simple_lama_inpainting 라이브러리를 사용하여 텍스트를 지웁니다."""
+def erase_text_with_lama(lama_model, image_rgb, mask):
+    """미리 로드된 simple_lama_inpainting 모델을 사용하여 텍스트를 지웁니다."""
     print("Simple LaMa Inpainting을 시작합니다...")
-    lama = SimpleLama(device=config.DEVICE)
     image_pil = Image.fromarray(image_rgb)
     mask_pil = Image.fromarray(mask)
-    inpainted_image_pil = lama(image_pil, mask_pil)
+    inpainted_image_pil = lama_model(image_pil, mask_pil)
     inpainted_image = np.array(inpainted_image_pil)
     print("Simple LaMa Inpainting 완료.")
     return inpainted_image
+
+
+def _calculate_new_size(original_width, original_height, max_long_side=512):
+    """
+    가로세로 비율을 유지하면서 긴 쪽이 max_long_side가 되도록 새 크기를 계산합니다.
+    크기는 8의 배수로 맞춰줍니다.
+    """
+    if original_width > original_height:
+        scale = max_long_side / original_width
+        new_width = max_long_side
+        new_height = int(original_height * scale)
+    else:
+        scale = max_long_side / original_height
+        new_height = max_long_side
+        new_width = int(original_width * scale)
+
+    # 모델 입력은 8의 배수여야 함
+    new_width = new_width - new_width % 8
+    new_height = new_height - new_height % 8
+
+    return new_width, new_height
+
+
+def erase_text_in_batch(lama_model, image_mask_pairs):
+    """
+    여러 (이미지, 마스크) 쌍을 배치로 받아 한 번에 Inpainting을 수행합니다.
+    [수정] 가로세로 비율을 유지하도록 리사이즈 로직 변경
+    """
+    if not image_mask_pairs:
+        return []
+
+    print(f"총 {len(image_mask_pairs)}개 이미지를 배치로 Inpainting 시작...")
+
+    original_sizes = []
+    batch_images = []
+    batch_masks = []
+    for image_rgb, mask in image_mask_pairs:
+        image_pil = Image.fromarray(image_rgb)
+        mask_pil = Image.fromarray(mask).convert("L")
+
+        original_width, original_height = image_pil.size
+        original_sizes.append((original_width, original_height))
+
+        # [수정] 가로세로 비율을 유지하는 리사이즈 크기 계산
+        new_width, new_height = _calculate_new_size(original_width, original_height)
+
+        # [수정] 고품질 리샘플링(LANCZOS)을 사용하여 계산된 크기로 리사이즈
+        resized_image = image_pil.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # [수정] 마스크는 경계가 뭉개지지 않도록 NEAREST(최근방 이웃 보간법) 적용
+        resized_mask = mask_pil.resize((new_width, new_height), Image.Resampling.NEAREST)
+
+        batch_images.append(resized_image)
+        batch_masks.append(resized_mask)
+
+    # 2. PIL 이미지를 PyTorch 텐서로 변환 (이 부분은 변경 없음)
+    img_tensors = [to_tensor(img) for img in batch_images]
+    mask_tensors = [to_tensor(mask) for mask in batch_masks]
+
+    img_batch = torch.stack(img_tensors).to(lama_model.device)
+    mask_batch = torch.stack(mask_tensors).to(lama_model.device)
+
+    # 3. 모델 예측 (이 부분은 변경 없음)
+    with torch.no_grad():
+        inpainted_batch = lama_model.model(img_batch, mask_batch)
+
+    # 4. 후처리: 텐서를 다시 PIL 이미지로 변환하고 원본 크기로 복원
+    output_images = []
+    for i in range(inpainted_batch.size(0)):
+        inpainted_tensor = inpainted_batch[i].cpu()
+        inpainted_pil = to_pil_image(inpainted_tensor)
+
+        # [수정] 찌그러뜨리지 않았으므로, 원본 크기로 바로 리사이즈하면 됨
+        inpainted_pil = inpainted_pil.resize(original_sizes[i], Image.Resampling.LANCZOS)
+        output_images.append(np.array(inpainted_pil))
+
+    print("배치 Inpainting 완료.")
+    return output_images
 
 
 def _wrap_text(text, font, max_width):

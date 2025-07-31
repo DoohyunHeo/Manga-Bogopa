@@ -5,10 +5,12 @@ import pytesseract
 import google.generativeai as genai
 import numpy as np
 import tensorflow as tf
+from simple_lama_inpainting import SimpleLama
 from ultralytics import YOLO
 from PIL import Image
 from src import config
 from src.batch_manga_ocr import BatchMangaOcr
+import concurrent.futures
 
 FONT_CLASS_NAMES = ['bold', 'confused', 'handwriting', 'narration', 'sad', 'shouting', 'standard']
 
@@ -37,6 +39,10 @@ def initialize_models_and_session():
         print(f"경고: 폰트 분류 모델 로드 실패. 기본 스타일만 사용됩니다. -> {e}")
         font_classifier_model = None
 
+    # LaMa 모델을 이곳에서 한 번만 초기화합니다.
+    lama_model = SimpleLama(device=config.DEVICE)
+    print("SimpleLama Inpainting 모델을 성공적으로 로드했습니다.")
+
     translation_model = genai.GenerativeModel(config.GEMINI_MODEL)
     chat_session = translation_model.start_chat(history=[
         {'role': 'user', 'parts': [system_prompt]},
@@ -44,7 +50,8 @@ def initialize_models_and_session():
     ])
 
     print("초기화 완료.")
-    return detection_model, ocr_model, chat_session, font_classifier_model
+    # 초기화된 lama_model을 함께 반환합니다.
+    return detection_model, ocr_model, chat_session, font_classifier_model, lama_model
 
 
 def _is_kana(char):
@@ -145,6 +152,7 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
 def process_image_batch(models, batch_images_rgb, batch_paths):
     """
     이미지 배치 전체를 받아 탐지, OCR, 구조화, 번역까지 모두 처리하는 통합 함수.
+    [개선] 순차 처리 부분을 배치 및 병렬 처리로 최적화
     """
     detection_model, ocr_model, chat_session, font_classifier = models
 
@@ -158,7 +166,6 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     for page_idx, (image_rgb, results) in enumerate(zip(batch_images_rgb, batch_results)):
         page_identifier = os.path.basename(batch_paths[page_idx])
 
-        # [추가] 페이지별 디버그 폴더 생성
         safe_subdir_name = page_identifier.replace('.', '_')
         page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
         if config.SAVE_DEBUG_CROPS:
@@ -179,33 +186,56 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                     'page_idx': page_idx, 'crop': cropped_pil, 'box': coords, 'class_name': class_name
                 })
 
+    if not all_items_to_process:
+        untranslated_data = [{"source_page": os.path.basename(p), "speech_bubbles": [], "freeform_texts": []} for p in
+                             batch_paths]
+        return translate_image_batch(chat_session, untranslated_data)
+
     # 3. MangaOCR 일괄 처리
     print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 Batch OCR (GPU) 처리 중...")
-    all_ocr_results = ocr_model([item['crop'] for item in all_items_to_process]) if all_items_to_process else []
+    all_ocr_results = ocr_model([item['crop'] for item in all_items_to_process])
 
-    # 4. CPU 작업 순차 처리
+    # 4. [개선] 폰트 스타일 일괄 분류 (배치 처리)
+    font_styles = ['standard'] * len(all_items_to_process)
+    if font_classifier:
+        print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 분류 (배치) 처리 중...")
+        # [수정] 크기가 다른 이미지를 바로 배열로 만들 수 없으므로, 먼저 리스트에 저장합니다.
+        font_images_to_classify = [np.array(item['crop']) for item in all_items_to_process]
+
+        # [수정] 각 이미지를 개별적으로 리사이즈한 후, tf.stack으로 하나의 배치 텐서로 합칩니다.
+        resized_images_list = [tf.image.resize(img, (96, 96)) for img in font_images_to_classify]
+        image_batch = tf.stack(resized_images_list)
+
+        # 모델 예측
+        predictions = font_classifier.predict(image_batch, batch_size=config.OCR_BATCH_SIZE, verbose=0)
+        predicted_indices = np.argmax(predictions, axis=1)
+        font_styles = [config.FONT_CLASS_NAMES[i] for i in predicted_indices]
+
+    # 5. [개선] 폰트 크기 병렬 계산 (병렬 처리)
+    print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 크기 (병렬) 계산 중...")
+    crops_for_font_size = [item['crop'] for item in all_items_to_process]
+    font_sizes = [0] * len(all_items_to_process)
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        font_sizes = list(executor.map(_calculate_font_size, crops_for_font_size))
+
+    # 6. [개선] 사전 계산된 결과 통합 (매우 빠름)
     processed_text_items = []
-    print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 순차 처리 중...")
-    for item, ocr_text in zip(all_items_to_process, all_ocr_results):
-        if not ocr_text: continue
+    print("-> 사전 계산된 결과 통합 중...")
+    for i, item in enumerate(all_items_to_process):
+        if not all_ocr_results[i]: continue
 
-        font_size = _calculate_font_size(item['crop'])
-        font_style = 'standard'
-        if font_classifier:
-            img_array = tf.image.resize(np.array(item['crop']), (96, 96))
-            img_array = tf.expand_dims(img_array, 0)
-            predictions = font_classifier.predict(img_array, verbose=0)
-            font_style = config.FONT_CLASS_NAMES[np.argmax(predictions[0])]
+        font_size = font_sizes[i]
+        font_style = font_styles[i]
 
         base_font_size = font_size if font_size > 0 else (item['box'][3] - item['box'][1])
         final_font_size = int(max(config.MIN_FONT_SIZE, min(base_font_size, config.MAX_FONT_SIZE)))
 
         processed_text_items.append({
             'page_idx': item['page_idx'], 'box': item['box'], 'class_name': item['class_name'],
-            'original_text': ocr_text, 'font_size': final_font_size, 'font_style': font_style
+            'original_text': all_ocr_results[i], 'font_size': final_font_size, 'font_style': font_style
         })
 
-    # 5. 페이지별로 최종 데이터 구조 조립
+    # 7. 페이지별로 최종 데이터 구조 조립
     untranslated_batch_data = []
     for page_idx, path in enumerate(batch_paths):
         page_identifier = os.path.basename(path)
@@ -217,7 +247,6 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
         page_free_texts = [item for item in processed_text_items if
                            item['page_idx'] == page_idx and item['class_name'] == 'free_text']
 
-        # 1:1 매칭 로직
         structured_bubbles = []
         unmatched_text_indices = set(range(len(page_texts)))
         for bubble_box in page_bubbles:
@@ -261,7 +290,7 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
             "freeform_texts": page_free_texts
         })
 
-    # 6. 배치 단위 번역
+    # 8. 배치 단위 번역
     final_batch_data = translate_image_batch(chat_session, untranslated_batch_data)
 
     return final_batch_data

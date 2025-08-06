@@ -4,6 +4,7 @@ import cv2
 import json
 import numpy as np
 import google.generativeai as genai
+import timm
 from PIL import Image
 from ultralytics import YOLO
 import torch
@@ -16,7 +17,7 @@ from simple_lama_inpainting import SimpleLama
 
 
 class Letterbox:
-    def __init__(self, new_shape=(224, 224), color=(128, 128, 128)):
+    def __init__(self, new_shape=(256, 256), color=(128, 128, 128)):
         self.new_shape = new_shape
         self.color = color
 
@@ -36,19 +37,29 @@ class Letterbox:
 class FontClassifierModel(nn.Module):
     def __init__(self, num_classes, style_mapping=None):
         super(FontClassifierModel, self).__init__()
-        self.backbone = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT).features
+        # [수정] timm을 사용하여 ConvNeXT V2 백본 로드
+        self.backbone = timm.create_model(
+            'convnextv2_tiny.fcmae_ft_in1k',
+            pretrained=True,
+            features_only=True
+        )
+        last_channel = 768 # ConvNeXT V2 Tiny의 출력 채널
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(1280, 512), nn.ReLU())
+        self.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(last_channel, 512), nn.ReLU())
         self.angle_head = nn.Linear(512, 1)
         self.style_head = nn.Linear(512, num_classes)
         self.style_mapping = style_mapping
 
     def forward(self, x):
-        x = self.backbone(x);
-        x = self.pool(x);
-        x = torch.flatten(x, 1);
+        # timm의 features_only는 각 단계별 특징 맵의 리스트를 반환하므로, 마지막 것을 사용
+        features = self.backbone(x)
+        x = features[-1]
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
         x = self.fc(x)
-        return {"angle": self.angle_head(x).squeeze(-1), "style": self.style_head(x)}
+        angle_output = self.angle_head(x).squeeze(-1)
+        style_output = self.style_head(x)
+        return {"angle": angle_output, "style": style_output}
 
 
 class FontSizeModel(nn.Module):
@@ -86,8 +97,8 @@ def initialize_models_and_session():
 
     try:
         checkpoint = torch.load(config.MTL_MODEL_PATH, map_location=config.DEVICE)
-        num_classes = checkpoint['num_classes']
         style_mapping = checkpoint['style_mapping']
+        num_classes = len(style_mapping)
         font_classifier_model = FontClassifierModel(num_classes, style_mapping)
         font_classifier_model.load_state_dict(checkpoint['model_state_dict'])
         font_classifier_model.to(config.DEVICE)
@@ -145,7 +156,7 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     detection_model, ocr_model, chat_session, font_classifier_model, font_size_model = models
 
     print(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
-    batch_results = detection_model(batch_images_rgb, conf=0.7)
+    batch_results = detection_model(batch_images_rgb, conf=0.5)
     all_items_to_process, all_bubbles_by_page = [], [[] for _ in batch_images_rgb]
     for page_idx, (image_rgb, results) in enumerate(zip(batch_images_rgb, batch_results)):
         page_identifier = os.path.basename(batch_paths[page_idx]);

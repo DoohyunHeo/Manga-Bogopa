@@ -103,39 +103,53 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
     """
     font_size = min(initial_font_size, config.MAX_FONT_SIZE)
     font = None
-    wrapped_text = ""
+    wrapped_text = text
+    force_break = False
 
-    #폰트 크기 축소
-    while font_size >= config.MIN_FONT_SIZE:
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except IOError:
-            font = ImageFont.load_default()
-            # 기본 폰트는 사이즈 조절이 안되므로 루프 중단
-            break
+    while True: # Loop for potential re-wrapping
+        current_font_size = font_size
+        # Font size reduction loop
+        while current_font_size >= config.MIN_FONT_SIZE:
+            try:
+                font = ImageFont.truetype(font_path, current_font_size)
+            except IOError:
+                font = ImageFont.load_default()
+                break
 
-        wrapped_text = _wrap_text(text, font, target_width)
+            wrapped_text = _wrap_text(text, font, target_width)
 
-        try:
-            text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-            text_block_height = text_bbox[3] - text_bbox[1]
-            text_block_width = text_bbox[2] - text_bbox[0]
-        except AttributeError:
-            # 구버전 Pillow 호환
-            text_block_height = font_size * len(wrapped_text.split('\n'))
-            text_block_width = target_width
+            try:
+                text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+                text_block_height = text_bbox[3] - text_bbox[1]
+                text_block_width = text_bbox[2] - text_bbox[0]
+            except AttributeError:
+                text_block_height = current_font_size * len(wrapped_text.split('\n'))
+                text_block_width = target_width
 
-        target_area = target_width * target_height
-        text_area = text_block_width * text_block_height
-        fill_ratio = (text_area / target_area) if target_area > 0 else 1
+            if text_block_width <= target_width and text_block_height <= target_height:
+                break
 
-        # 높이, 너비, 면적 조건을 모두 만족하면 축소 중단
-        if text_block_width <= target_width and text_block_height <= target_height:
-            break
+            current_font_size -= 1
 
-        font_size -= 1
+        # Check if forced line break is needed
+        if not force_break and (current_font_size / initial_font_size) < config.FONT_SHRINK_THRESHOLD_RATIO:
+            lines = wrapped_text.split('\n')
+            if lines:
+                longest_line_index = max(range(len(lines)), key=lambda i: len(lines[i]))
+                longest_line = lines[longest_line_index]
+                if len(longest_line) > 1:
+                    # Break the longest line in the middle
+                    break_point = len(longest_line) // 2
+                    lines[longest_line_index] = longest_line[:break_point] + "\n" + longest_line[break_point:]
+                    wrapped_text = "\n".join(lines)
+                    force_break = True # Avoid infinite loop
+                    font_size = min(initial_font_size, config.MAX_FONT_SIZE) # Reset font size
+                    continue # Restart the whole process with the new text
 
-    # 폰트 크기 확대
+        # If no forced break was needed or it was already done, exit the loop
+        break
+
+    # Font size upscale logic (remains the same)
     if config.FONT_UPSCALE_IF_TOO_SMALL and font:
         try:
             text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
@@ -146,22 +160,20 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
                 last_good_font = font
                 last_good_wrapped_text = wrapped_text
 
-                while font_size < config.MAX_FONT_SIZE:
-                    font_size += 1
+                while current_font_size < config.MAX_FONT_SIZE:
+                    current_font_size += 1
                     try:
-                        temp_font = ImageFont.truetype(font_path, font_size)
+                        temp_font = ImageFont.truetype(font_path, current_font_size)
                     except IOError:
                         break
 
-                    temp_wrapped_text = _wrap_text(text, temp_font, target_width)
+                    temp_wrapped_text = _wrap_text(wrapped_text, temp_font, target_width)
                     temp_bbox = draw.multiline_textbbox((0, 0), temp_wrapped_text, font=temp_font, align="center")
 
                     temp_block_width = temp_bbox[2] - temp_bbox[0]
                     temp_block_height = temp_bbox[3] - temp_bbox[1]
-                    temp_area = temp_block_width * temp_block_height
-                    fill_ratio = (temp_area / target_area) if target_area > 0 else 1
 
-                    if temp_block_width > target_width or temp_block_height > target_height or fill_ratio >= config.MIN_AREA_FILL_RATIO:
+                    if temp_block_width > target_width or temp_block_height > target_height:
                         break
 
                     last_good_font = temp_font
@@ -173,6 +185,7 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
             pass
 
     return font, wrapped_text
+
 
 
 def _find_best_fit_font_vertical(draw, text, initial_font_size, target_height, font_path):
@@ -298,7 +311,7 @@ def draw_translations(inpainted_image, page_data):
         translated_text = bubble['translated_text']
         font_path = config.FONT_MAP.get(bubble.get('font_style', 'standard'), config.DEFAULT_FONT_PATH)
         predicted_px_size = bubble['font_size']
-        angle = bubble.get('angle', 0)
+        angle = int(bubble.get('angle', 0))
         bubble_box, text_box = bubble['bubble_box'], bubble['text_box']
 
         box_width, box_height = text_box[2] - text_box[0], text_box[3] - text_box[1]
@@ -354,7 +367,7 @@ def draw_translations(inpainted_image, page_data):
 
         font_path = config.FONT_MAP.get(freeform.get('font_style', 'standard'), config.DEFAULT_FONT_PATH)
         predicted_px_size = freeform['font_size']
-        angle = freeform.get('angle', 0)
+        angle = int(freeform.get('angle', 0))
         box = freeform['text_box']
         target_width = (box[2] - box[0]) * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
         target_height = (box[3] - box[1]) * (1 + config.VERTICAL_TOLERANCE_RATIO)
@@ -362,14 +375,17 @@ def draw_translations(inpainted_image, page_data):
                                                  target_height, font_path)
 
         if font:
-            center_x, center_y = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-            
+            # Get the size of the text block to be drawn
+            text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+
+            # Desired position: horizontally centered, vertically top-aligned to the original box
+            center_x = (box[0] + box[2]) / 2
+            center_y = box[1] + text_height / 2 # Center of the new text block when top-aligned
+
             if abs(angle) > config.MIN_ROTATION_ANGLE:
                 try:
-                    text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-
                     txt_img = Image.new('RGBA', (text_width, text_height), (255, 255, 255, 0))
                     txt_draw = ImageDraw.Draw(txt_img)
                     txt_draw.text((0, 0), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
@@ -378,22 +394,30 @@ def draw_translations(inpainted_image, page_data):
 
                     rotated_txt = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
                     
-                    initial_bbox = (center_x - rotated_txt.width/2, center_y - rotated_txt.height/2, center_x + rotated_txt.width/2, center_y + rotated_txt.height/2)
+                    # The collision box is the rotated text box, centered at the desired top-aligned position
+                    initial_bbox = (center_x - rotated_txt.width / 2, center_y - rotated_txt.height / 2,
+                                    center_x + rotated_txt.width / 2, center_y + rotated_txt.height / 2)
+                    
                     adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
                     
                     paste_x = int(adj_center_x - rotated_txt.width / 2)
                     paste_y = int(adj_center_y - rotated_txt.height / 2)
                     
                     img_pil.paste(rotated_txt, (paste_x, paste_y), rotated_txt)
+
                 except Exception as e:
                     print(f"자유 텍스트 회전 실패: {e}, 일반 텍스트로 대체합니다.")
-                    initial_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+                    # Fallback to non-rotated text, but still top-aligned
+                    initial_bbox = (center_x - text_width / 2, center_y - text_height / 2, 
+                                    center_x + text_width / 2, center_y + text_height / 2)
                     adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
                     draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
                               stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
                               anchor="mm", align="center")
             else:
-                initial_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+                # Non-rotated text, top-aligned
+                initial_bbox = (center_x - text_width / 2, center_y - text_height / 2, 
+                                center_x + text_width / 2, center_y + text_height / 2)
                 adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
                 draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
                           stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,

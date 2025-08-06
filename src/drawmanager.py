@@ -56,6 +56,24 @@ def erase_patches_in_batch(lama_model, patch_mask_list, target_size=512):
     return all_output_patches
 
 
+def create_mask_from_coords(image, list_of_coords, padding=0):
+    """
+    좌표 리스트([x1, y1, x2, y2], ...)를 기반으로 Inpainting 마스크를 생성합니다.
+    """
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    for coords in list_of_coords:
+        x1, y1, x2, y2 = map(int, coords)
+
+        # 패딩 적용 및 이미지 경계 확인
+        padded_x1 = max(0, x1 - padding)
+        padded_y1 = max(0, y1 - padding)
+        padded_x2 = min(image.shape[1], x2 + padding)
+        padded_y2 = min(image.shape[0], y2 + padding)
+
+        cv2.rectangle(mask, (padded_x1, padded_y1), (padded_x2, padded_y2), 255, -1)
+    return mask
+
+
 def _wrap_text(text, font, max_width):
     """단어/글자 단위로 줄 바꿈을 수행하는 함수입니다. """
     lines = []
@@ -112,10 +130,10 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
         fill_ratio = (text_area / target_area) if target_area > 0 else 1
 
         # 높이, 너비, 면적 조건을 모두 만족하면 축소 중단
-        if text_block_width <= target_width and text_block_height <= target_height and fill_ratio < config.MAX_AREA_FILL_RATIO:
+        if text_block_width <= target_width and text_block_height <= target_height:
             break
 
-        font_size -= 2
+        font_size -= 1
 
     # 폰트 크기 확대
     if config.FONT_UPSCALE_IF_TOO_SMALL and font:
@@ -129,7 +147,7 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
                 last_good_wrapped_text = wrapped_text
 
                 while font_size < config.MAX_FONT_SIZE:
-                    font_size += 2
+                    font_size += 1
                     try:
                         temp_font = ImageFont.truetype(font_path, font_size)
                     except IOError:
@@ -143,7 +161,7 @@ def _find_best_fit_font(draw, text, initial_font_size, target_width, target_heig
                     temp_area = temp_block_width * temp_block_height
                     fill_ratio = (temp_area / target_area) if target_area > 0 else 1
 
-                    if temp_block_width > target_width or temp_block_height > target_height or fill_ratio >= config.MAX_AREA_FILL_RATIO:
+                    if temp_block_width > target_width or temp_block_height > target_height or fill_ratio >= config.MIN_AREA_FILL_RATIO:
                         break
 
                     last_good_font = temp_font
@@ -220,98 +238,165 @@ def _get_alignment_for_bubble(attachment, text_union_box, bubble_box):
     return align, anchor, center_x, center_y
 
 
-def draw_translations(image_rgb, page_data):
+def _rects_intersect(rect1, rect2):
+    """두 사각형(x1, y1, x2, y2)이 겹치는지 확인하는 함수"""
+    return not (rect1[2] < rect2[0] or rect1[0] > rect2[2] or rect1[3] < rect2[1] or rect1[1] > rect2[3])
+
+
+def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects):
     """
-    말풍선 비율에 따라 가로/세로 쓰기를 자동으로 전환하여 식자합니다.
+    자유 텍스트가 말풍선 텍스트와 겹치면 상하좌우 중 최소 이동 거리로 위치를 조정하여
+    새로운 (x, y) 좌표를 반환합니다.
     """
-    print("식자 작업을 시작합니다...")
-    img_pil = Image.fromarray(image_rgb)
+    adj_x, adj_y = center_x, center_y
+
+    for bubble_text_rect in bubble_text_rects:
+        w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
+        current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
+
+        if _rects_intersect(current_bbox, bubble_text_rect):
+            moves = {
+                'up': current_bbox[3] - bubble_text_rect[1],
+                'down': bubble_text_rect[3] - current_bbox[1],
+                'left': current_bbox[2] - bubble_text_rect[0],
+                'right': bubble_text_rect[2] - current_bbox[0]
+            }
+
+            min_move_dir = min(moves, key=moves.get)
+
+            if min_move_dir == 'up':
+                adj_y -= moves['up']
+            elif min_move_dir == 'down':
+                adj_y += moves['down']
+            elif min_move_dir == 'left':
+                adj_x -= moves['left']
+            elif min_move_dir == 'right':
+                adj_x += moves['right']
+
+    return adj_x, adj_y
+
+
+def draw_translations(inpainted_image, page_data):
+    img_pil = Image.fromarray(inpainted_image)
     draw = ImageDraw.Draw(img_pil)
 
+    bubble_text_rects, used_freeform_indices = [], set()
     for bubble in page_data['speech_bubbles']:
-        if not (bubble.get('translated_text') and bubble.get('font_size')):
-            continue
+        if not bubble.get('translated_text'):
+            bubble_box = bubble['bubble_box']
+            for i, freeform in enumerate(page_data['freeform_texts']):
+                if i in used_freeform_indices: continue
+                ff_box = freeform['text_box']
+                center_x, center_y = (ff_box[0] + ff_box[2]) / 2, (ff_box[1] + ff_box[3]) / 2
+                if (bubble_box[0] < center_x < bubble_box[2] and bubble_box[1] < center_y < bubble_box[3]):
+                    bubble.update({k: v for k, v in freeform.items() if
+                                   k in ['translated_text', 'font_size', 'font_style', 'text_box', 'angle']})
+                    used_freeform_indices.add(i)
+                    break
+        if not (bubble.get('translated_text') and bubble.get('font_size')): continue
 
-        initial_font_size = bubble['font_size']
         translated_text = bubble['translated_text']
-        font_style = bubble.get('font_style', 'standard')
-        font_path = config.FONT_MAP.get(font_style, config.DEFAULT_FONT_PATH)
-        bubble_box = bubble['bubble_box']
-        text_box = bubble['text_box']
+        font_path = config.FONT_MAP.get(bubble.get('font_style', 'standard'), config.DEFAULT_FONT_PATH)
+        predicted_px_size = bubble['font_size']
+        angle = bubble.get('angle', 0)
+        bubble_box, text_box = bubble['bubble_box'], bubble['text_box']
 
-        bubble_width = bubble_box[2] - bubble_box[0]
-        bubble_height = bubble_box[3] - bubble_box[1]
-
-        is_vertical = (config.ENABLE_VERTICAL_TEXT and
-                       ' ' not in translated_text and
-                       bubble_width > 0 and
-                       (bubble_height / bubble_width >= config.VERTICAL_TEXT_THRESHOLD))
+        box_width, box_height = text_box[2] - text_box[0], text_box[3] - text_box[1]
+        is_vertical = (config.ENABLE_VERTICAL_TEXT and ' ' not in translated_text and box_width > 0 and (
+                    box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD))
 
         if is_vertical:
-            original_text_height = text_box[3] - text_box[1]
-            target_height = original_text_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
-            font, wrapped_text = _find_best_fit_font_vertical(draw, translated_text, initial_font_size, target_height,
+            target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
+            font, wrapped_text = _find_best_fit_font_vertical(draw, translated_text, predicted_px_size, target_height,
                                                               font_path)
-
             if font:
-                center_x = (bubble_box[0] + bubble_box[2]) // 2
-                center_y = (bubble_box[1] + bubble_box[3]) // 2
+                center_x, center_y = (text_box[0] + text_box[2]) / 2, (text_box[1] + text_box[3]) / 2
+                text_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm",
+                                                    align="center")
+                bubble_text_rects.append(text_bbox)
                 draw.text((center_x, center_y), wrapped_text, font=font, fill=(0, 0, 0), anchor="mm", align="center")
         else:
-            target_width = bubble_width * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
-            original_text_height = text_box[3] - text_box[1]
-            target_height = original_text_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
-
-            font, wrapped_text = _find_best_fit_font(draw, translated_text, initial_font_size, target_width,
+            target_width = (bubble_box[2] - bubble_box[0]) * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
+            target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
+            font, wrapped_text = _find_best_fit_font(draw, translated_text, predicted_px_size, target_width,
                                                      target_height, font_path)
-
             if font:
-                attachment = bubble.get('attachment', 'none')
-                align, anchor, center_x, center_y = _get_alignment_for_bubble(attachment, text_box, bubble_box)
-                draw.text((center_x, center_y), wrapped_text, font=font, fill=(0, 0, 0), anchor=anchor, align=align)
+                align, anchor, center_x, center_y = _get_alignment_for_bubble(bubble.get('attachment', 'none'),
+                                                                              text_box, bubble_box)
+                if abs(angle) > config.MIN_ROTATION_ANGLE:
+                    try:
+                        text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align=align)
+                        text_width = text_bbox[2] - text_bbox[0]
+                        text_height = text_bbox[3] - text_bbox[1]
 
-    for freeform in page_data['freeform_texts']:
-        if not (freeform.get('translated_text') and freeform.get('font_size')):
-            continue
+                        txt_img = Image.new('RGBA', (text_width, text_height), (255, 255, 255, 0))
+                        txt_draw = ImageDraw.Draw(txt_img)
+                        txt_draw.text((0, 0), wrapped_text, font=font, fill=(0, 0, 0), align=align)
 
-        initial_font_size = freeform['font_size']
-        translated_text = freeform['translated_text']
-        font_style = freeform.get('font_style', 'standard')
-        font_path = config.FONT_MAP.get(font_style, config.DEFAULT_FONT_PATH)
+                        rotated_txt = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+                        paste_x = int(center_x - rotated_txt.width / 2)
+                        paste_y = int(center_y - rotated_txt.height / 2)
+                        img_pil.paste(rotated_txt, (paste_x, paste_y), rotated_txt)
+                        bubble_text_rects.append((paste_x, paste_y, paste_x + rotated_txt.width, paste_y + rotated_txt.height))
+                    except Exception as e:
+                        print(f"텍스트 회전 실패: {e}, 일반 텍스트로 대체합니다.")
+                        text_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor=anchor, align=align)
+                        bubble_text_rects.append(text_bbox)
+                        draw.text((center_x, center_y), wrapped_text, font=font, fill=(0, 0, 0), anchor=anchor, align=align)
+                else:
+                    text_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor=anchor, align=align)
+                    bubble_text_rects.append(text_bbox)
+                    draw.text((center_x, center_y), wrapped_text, font=font, fill=(0, 0, 0), anchor=anchor, align=align)
+
+    for i, freeform in enumerate(page_data['freeform_texts']):
+        if i in used_freeform_indices: continue
+        if not (freeform.get('translated_text') and freeform.get('font_size')): continue
+
+        font_path = config.FONT_MAP.get(freeform.get('font_style', 'standard'), config.DEFAULT_FONT_PATH)
+        predicted_px_size = freeform['font_size']
+        angle = freeform.get('angle', 0)
         box = freeform['text_box']
-
-        box_width = box[2] - box[0]
-        box_height = box[3] - box[1]
-        target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
-        target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
-
-        font, wrapped_text = _find_best_fit_font(draw, translated_text, initial_font_size, target_width, target_height,
-                                                 font_path)
+        target_width = (box[2] - box[0]) * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
+        target_height = (box[3] - box[1]) * (1 + config.VERTICAL_TOLERANCE_RATIO)
+        font, wrapped_text = _find_best_fit_font(draw, freeform['translated_text'], predicted_px_size, target_width,
+                                                 target_height, font_path)
 
         if font:
-            center_x = (box[0] + box[2]) // 2
-            center_y = box[1]
-            draw.text((center_x, center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
-                      stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
-                      anchor="ma", align="center")
+            center_x, center_y = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            
+            if abs(angle) > config.MIN_ROTATION_ANGLE:
+                try:
+                    text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    text_height = text_bbox[3] - text_bbox[1]
 
-    print("식자 작업 완료.")
+                    txt_img = Image.new('RGBA', (text_width, text_height), (255, 255, 255, 0))
+                    txt_draw = ImageDraw.Draw(txt_img)
+                    txt_draw.text((0, 0), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
+                                  stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
+                                  align="center")
+
+                    rotated_txt = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+                    
+                    initial_bbox = (center_x - rotated_txt.width/2, center_y - rotated_txt.height/2, center_x + rotated_txt.width/2, center_y + rotated_txt.height/2)
+                    adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+                    
+                    paste_x = int(adj_center_x - rotated_txt.width / 2)
+                    paste_y = int(adj_center_y - rotated_txt.height / 2)
+                    
+                    img_pil.paste(rotated_txt, (paste_x, paste_y), rotated_txt)
+                except Exception as e:
+                    print(f"자유 텍스트 회전 실패: {e}, 일반 텍스트로 대체합니다.")
+                    initial_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+                    adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+                    draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
+                              stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
+                              anchor="mm", align="center")
+            else:
+                initial_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+                adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+                draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
+                          stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
+                          anchor="mm", align="center")
+
     return np.array(img_pil)
-
-
-def create_mask_from_coords(image, list_of_coords, padding=0):
-    """
-    좌표 리스트([x1, y1, x2, y2], ...)를 기반으로 Inpainting 마스크를 생성합니다.
-    """
-    mask = np.zeros(image.shape[:2], dtype=np.uint8)
-    for coords in list_of_coords:
-        x1, y1, x2, y2 = map(int, coords)
-
-        # 패딩 적용 및 이미지 경계 확인
-        padded_x1 = max(0, x1 - padding)
-        padded_y1 = max(0, y1 - padding)
-        padded_x2 = min(image.shape[1], x2 + padding)
-        padded_y2 = min(image.shape[0], y2 + padding)
-
-        cv2.rectangle(mask, (padded_x1, padded_y1), (padded_x2, padded_y2), 255, -1)
-    return mask

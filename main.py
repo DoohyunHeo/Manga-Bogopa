@@ -18,7 +18,7 @@ def main():
     try:
         models = extractor.initialize_models_and_session()
         (detection_model, ocr_model, chat_session, lama_model,
-         mtl_model, style_mapping) = models
+         font_classifier_model, font_size_model) = models
     except Exception as e:
         print(f"초기화 실패: {e}")
         return
@@ -31,18 +31,15 @@ def main():
 
     all_final_data = []
     batch_size = config.TRANSLATION_BATCH_SIZE
-
-    extraction_models = (detection_model, ocr_model, chat_session, mtl_model, style_mapping)
+    extraction_models = (detection_model, ocr_model, chat_session,
+                         font_classifier_model, font_size_model)
 
     for i in range(0, len(image_paths), batch_size):
         batch_paths = image_paths[i:i + batch_size]
         print(f"\n--- 처리 시작: 배치 {i // batch_size + 1} ({len(batch_paths)} 페이지) ---")
-
         batch_images_rgb = [cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB) for p in batch_paths if
                             cv2.imread(p) is not None]
         if not batch_images_rgb: continue
-
-        # --- 3. 추출 및 번역 일괄 처리 ---
         final_batch_data = extractor.process_image_batch(extraction_models, batch_images_rgb, batch_paths)
         all_final_data.extend(final_batch_data)
 
@@ -122,6 +119,7 @@ def main():
             print(f" -> '{output_path}'에 최종 결과물 저장 완료.")
 
     print("\n모든 프로세스 완료.")
+
 
 if __name__ == '__main__':
     main()

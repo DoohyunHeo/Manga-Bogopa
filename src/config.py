@@ -1,7 +1,7 @@
 import torch
 
 MODEL_PATH = 'data/models/v22.pt'
-INPUT_DIR = 'data/inputs3/'
+INPUT_DIR = 'data/inputs/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
 DEBUG_CROPS_DIR = 'data/debug_crops'
@@ -43,7 +43,7 @@ FONT_MAP = {
     "embarrassment": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/인천교육힘찬.ttf",
     "handwriting": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/NanumPen.ttf",
     "narration": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/NanumMyeongjoBold.ttf",
-    "sacred": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/흔적체.ttf",
+    "scared": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/흔적체.ttf",
     "shouting": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/Pretendard-ExtraBold.otf",
     "standard": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/Pretendard-SemiBold.otf"
 }

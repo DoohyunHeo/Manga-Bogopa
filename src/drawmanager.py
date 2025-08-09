@@ -17,7 +17,7 @@ def erase_patches_in_batch(lama_model, patch_mask_list, target_size=512):
     print(f"총 {len(patch_mask_list)}개의 텍스트 조각을 미니 배치로 나누어 Inpainting 시작...")
 
     all_output_patches = []
-    batch_size = 16
+    batch_size = 8
 
     for i in tqdm(range(0, len(patch_mask_list), batch_size), desc="Inpainting Batches"):
         mini_batch = patch_mask_list[i:i + batch_size]
@@ -342,9 +342,11 @@ def draw_translations(inpainted_image, page_data):
                         text_width = text_bbox[2] - text_bbox[0]
                         text_height = text_bbox[3] - text_bbox[1]
 
-                        txt_img = Image.new('RGBA', (text_width, text_height), (255, 255, 255, 0))
+                        safe_text_width = int(text_width) + 2
+                        safe_text_height = int(text_height) + 2
+                        txt_img = Image.new('RGBA', (safe_text_width, safe_text_height), (255, 255, 255, 0))
                         txt_draw = ImageDraw.Draw(txt_img)
-                        txt_draw.text((0, 0), wrapped_text, font=font, fill=(0, 0, 0), align=align)
+                        txt_draw.text((1, 1), wrapped_text, font=font, fill=(0, 0, 0), align=align)
 
                         rotated_txt = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
                         paste_x = int(center_x - rotated_txt.width / 2)
@@ -386,9 +388,11 @@ def draw_translations(inpainted_image, page_data):
 
             if abs(angle) > config.MIN_ROTATION_ANGLE:
                 try:
-                    txt_img = Image.new('RGBA', (text_width, text_height), (255, 255, 255, 0))
+                    safe_text_width = int(text_width) + 2
+                    safe_text_height = int(text_height) + 2
+                    txt_img = Image.new('RGBA', (safe_text_width, safe_text_height), (255, 255, 255, 0))
                     txt_draw = ImageDraw.Draw(txt_img)
-                    txt_draw.text((0, 0), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
+                    txt_draw.text((1, 1), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR,
                                   stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR,
                                   align="center")
 

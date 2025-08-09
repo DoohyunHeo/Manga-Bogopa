@@ -1,5 +1,7 @@
 import os
 import re
+from collections import defaultdict
+
 import cv2
 import json
 import numpy as np
@@ -152,30 +154,128 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
         return 'none'
 
 
+def _calculate_iou(box_a, box_b):
+    """두 바운딩 박스(x1, y1, x2, y2)의 IoU를 계산합니다."""
+    xA = max(box_a[0], box_b[0])
+    yA = max(box_a[1], box_b[1])
+    xB = min(box_a[2], box_b[2])
+    yB = min(box_a[3], box_b[3])
+
+    inter_area = max(0, xB - xA) * max(0, yB - yA)
+    box_a_area = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    box_b_area = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+
+    # 분모가 0이 되는 경우 방지
+    denominator = float(box_a_area + box_b_area - inter_area)
+    if denominator == 0:
+        return 0.0
+
+    iou = inter_area / denominator
+    return iou
+
+
+def _merge_boxes(boxes):
+    """여러 바운딩 박스를 모두 포함하는 가장 작은 단일 박스를 반환합니다."""
+    min_x = min(box[0] for box in boxes)
+    min_y = min(box[1] for box in boxes)
+    max_x = max(box[2] for box in boxes)
+    max_y = max(box[3] for box in boxes)
+    return np.array([min_x, min_y, max_x, max_y])
+
+
 def process_image_batch(models, batch_images_rgb, batch_paths):
     detection_model, ocr_model, chat_session, font_classifier_model, font_size_model = models
 
+    # 1. YOLO 객체 탐지
     print(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
-    batch_results = detection_model(batch_images_rgb, conf=0.5)
-    all_items_to_process, all_bubbles_by_page = [], [[] for _ in batch_images_rgb]
+    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD)
+
+    # 2. 텍스트/말풍선 영역 추출 및 수집
+    all_items_to_process = []
+    all_bubbles_by_page = [[] for _ in batch_images_rgb]
     for page_idx, (image_rgb, results) in enumerate(zip(batch_images_rgb, batch_results)):
-        page_identifier = os.path.basename(batch_paths[page_idx]);
-        safe_subdir_name = os.path.splitext(page_identifier)[0]
-        page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
-        if config.SAVE_DEBUG_CROPS: os.makedirs(page_debug_dir, exist_ok=True)
         for i, box in enumerate(results.boxes):
-            class_name = results.names[int(box.cls[0])];
-            coords = box.xyxy[0].cpu().numpy().astype(int)
+            class_name = results.names[int(box.cls[0])]
+            coords = box.xyxy[0].cpu().numpy()
             if class_name == 'bubble':
-                all_bubbles_by_page[page_idx].append(coords)
-            elif class_name in config.TARGET_CLASSES:
-                cropped_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
-                if config.SAVE_DEBUG_CROPS and page_debug_dir:
-                    cropped_pil.save(os.path.join(page_debug_dir, f"{i:03d}_{class_name}.png"))
-                all_items_to_process.append(
-                    {'page_idx': page_idx, 'crop': cropped_pil, 'box': coords, 'class_name': class_name})
-    if not all_items_to_process: return [
-        {"source_page": os.path.basename(p), "speech_bubbles": [], "freeform_texts": []} for p in batch_paths]
+                all_bubbles_by_page[page_idx].append(coords.astype(int))
+            elif class_name in ['text', 'free_text']:
+                all_items_to_process.append({
+                    'page_idx': page_idx, 'box': coords,
+                    'class_name': class_name, 'crop': None
+                })
+
+    # [수정] 3. 겹치는 텍스트 박스 병합 (클래스별, 페이지별)
+    print(f"-> {len(all_items_to_process)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
+    grouped_items = defaultdict(list)
+    for item in all_items_to_process:
+        grouped_items[(item['page_idx'], item['class_name'])].append(item)
+
+    final_items = []
+    for (page_idx, class_name), items in grouped_items.items():
+        if len(items) < 2:
+            final_items.extend(items)
+            continue
+
+        num_items = len(items)
+        adj_matrix = np.zeros((num_items, num_items))
+        for i in range(num_items):
+            for j in range(i, num_items):
+                if i == j: continue
+                iou = _calculate_iou(items[i]['box'], items[j]['box'])
+                if iou > config.TEXT_MERGE_OVERLAP_THRESHOLD:
+                    adj_matrix[i, j] = 1
+                    adj_matrix[j, i] = 1
+
+        visited = [False] * num_items
+        clusters = []
+        for i in range(num_items):
+            if not visited[i]:
+                component = []
+                q = [i]
+                visited[i] = True
+                while q:
+                    u = q.pop(0)
+                    component.append(u)
+                    for v in range(num_items):
+                        if adj_matrix[u, v] and not visited[v]:
+                            visited[v] = True
+                            q.append(v)
+                clusters.append(component)
+
+        for cluster_indices in clusters:
+            if len(cluster_indices) > 1:
+                cluster_items = [items[k] for k in cluster_indices]
+                merged_box = _merge_boxes([item['box'] for item in cluster_items])
+                final_items.append({
+                    'page_idx': page_idx,
+                    'box': merged_box,
+                    'class_name': class_name,
+                    'crop': None
+                })
+            else:
+                final_items.append(items[cluster_indices[0]])
+
+    all_items_to_process = final_items
+    print(f"-> 병합 후 {len(all_items_to_process)}개의 객체로 정리되었습니다.")
+
+    # 병합된 최종 박스 기준으로 이미지 크롭 및 디버그 저장
+    for item in all_items_to_process:
+        image_rgb = batch_images_rgb[item['page_idx']]
+        coords = item['box'].astype(int)
+        item['crop'] = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
+
+        if config.SAVE_DEBUG_CROPS:
+            page_identifier = os.path.basename(batch_paths[item['page_idx']])
+            safe_subdir_name = os.path.splitext(page_identifier)[0]
+            page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
+            os.makedirs(page_debug_dir, exist_ok=True)
+            # 파일 이름 중복을 피하기 위해 좌표 정보 사용
+            crop_filename = f"{coords[0]}_{coords[1]}_{item['class_name']}.png"
+            item['crop'].save(os.path.join(page_debug_dir, crop_filename))
+
+    if not all_items_to_process:
+        return [{"source_page": os.path.basename(p), "speech_bubbles": [], "freeform_texts": []} for p in batch_paths]
 
     print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 Batch OCR 처리 중...")
     all_ocr_results = ocr_model([item['crop'] for item in all_items_to_process])
@@ -183,9 +283,25 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     all_props = []
     if font_classifier_model and font_size_model:
         print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 모델로 일괄 분석 중...")
-        transform = transforms.Compose([Letterbox(config.IMAGE_SIZE), transforms.ToTensor(),
-                                        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-        image_tensors = [transform(item['crop'].convert("RGB")) for item in all_items_to_process]
+
+        target_size = config.IMAGE_SIZE
+        letterbox_transform = Letterbox(target_size)
+        center_crop_transform = transforms.CenterCrop(target_size)
+        tensor_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        image_tensors = []
+        for item in all_items_to_process:
+            image = item['crop'].convert("RGB")
+            # If image is larger than target, center crop it. Otherwise, use letterbox.
+            if image.width > target_size[1] or image.height > target_size[0]:
+                processed_image = center_crop_transform(image)
+            else:
+                processed_image = letterbox_transform(image)
+            image_tensors.append(tensor_transform(processed_image))
+
         image_batch = torch.stack(image_tensors).to(config.DEVICE)
 
         with torch.no_grad():

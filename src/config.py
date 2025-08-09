@@ -11,6 +11,9 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 TARGET_CLASSES = ['bubble', 'text', 'free_text']
 CLASSES_TO_ERASE = ['text', 'free_text']
 GEMINI_MODEL = 'gemini-2.5-flash'
+YOLO_CONF_THRESHOLD = 0.5
+
+TEXT_MERGE_OVERLAP_THRESHOLD = 0.2
 
 BUBBLE_PADDING = 0
 BUBBLE_EDGE_SAFE_MARGIN = 10

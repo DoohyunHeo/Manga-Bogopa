@@ -2,6 +2,7 @@ import torch
 from manga_ocr import MangaOcr
 from transformers import AutoTokenizer
 import sys
+from tqdm import tqdm
 
 
 class BatchMangaOcr(MangaOcr):
@@ -44,7 +45,7 @@ class BatchMangaOcr(MangaOcr):
     def ocr_batch(self, image_list, max_length=128):
         results = []
         # 생성자에서 받은 self.batch_size 사용
-        for i in range(0, len(image_list), self.batch_size):
+        for i in tqdm(range(0, len(image_list), self.batch_size), desc="OCR"):
             batch_images = image_list[i:i + self.batch_size]
 
             # processor는 내부적으로 이미지 리사이즈 및 텐서 변환을 수행

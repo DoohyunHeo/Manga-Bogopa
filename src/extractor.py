@@ -280,41 +280,49 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 Batch OCR 처리 중...")
     all_ocr_results = ocr_model([item['crop'] for item in all_items_to_process])
 
+    # [수정] 4. MTL 폰트 모델 예측 (미니 배치 적용)
     all_props = []
-    if font_classifier_model and font_size_model:
-        print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 모델로 일괄 분석 중...")
+    if font_classifier_model and font_size_model and all_items_to_process:
+        print(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 모델로 미니 배치 분석 중...")
 
-        target_size = config.IMAGE_SIZE
-        letterbox_transform = Letterbox(target_size)
-        center_crop_transform = transforms.CenterCrop(target_size)
-        tensor_transform = transforms.Compose([
+        transform = transforms.Compose([
+            Letterbox(config.IMAGE_SIZE),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        image_tensors = []
-        for item in all_items_to_process:
-            image = item['crop'].convert("RGB")
-            # If image is larger than target, center crop it. Otherwise, use letterbox.
-            if image.width > target_size[1] or image.height > target_size[0]:
-                processed_image = center_crop_transform(image)
-            else:
-                processed_image = letterbox_transform(image)
-            image_tensors.append(tensor_transform(processed_image))
+        # 예측 결과를 저장할 리스트
+        final_pred_sizes = []
+        final_pred_angles = []
+        final_pred_style_indices = []
 
-        image_batch = torch.stack(image_tensors).to(config.DEVICE)
+        batch_size = config.FONT_MODEL_BATCH_SIZE
 
-        with torch.no_grad():
-            outputs_classifier = font_classifier_model(image_batch)
-            pred_sizes = font_size_model(image_batch).cpu().numpy()
+        # 미니 배치 루프
+        for i in range(0, len(all_items_to_process), batch_size):
+            mini_batch_items = all_items_to_process[i:i + batch_size]
 
-        pred_angles = outputs_classifier['angle'].cpu().numpy()
-        pred_style_indices = torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy()
+            crops_for_mtl = [item['crop'].convert("RGB") for item in mini_batch_items]
+            image_tensors = [transform(crop) for crop in crops_for_mtl]
+            image_batch = torch.stack(image_tensors).to(config.DEVICE)
 
-        for i in range(len(pred_sizes)):
-            style_name = font_classifier_model.style_mapping.get(pred_style_indices[i], 'standard')
-            all_props.append(
-                {'font_size': int(round(pred_sizes[i])) + 6, 'angle': float(pred_angles[i]), 'font_style': style_name})
+            with torch.no_grad():
+                outputs_classifier = font_classifier_model(image_batch)
+                pred_sizes = font_size_model(image_batch)
+
+                final_pred_sizes.extend(pred_sizes.cpu().numpy())
+                final_pred_angles.extend(outputs_classifier['angle'].cpu().numpy())
+                final_pred_style_indices.extend(torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy())
+
+        # 종합된 결과로 all_props 리스트 생성
+        for i in range(len(final_pred_sizes)):
+            style_idx = int(final_pred_style_indices[i])
+            style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
+            all_props.append({
+                'font_size': int(round(final_pred_sizes[i])),
+                'angle': float(final_pred_angles[i]),
+                'font_style': style_name
+            })
     else:
         all_props = [{'font_size': 20, 'angle': 0.0, 'font_style': 'standard'}] * len(all_items_to_process)
 

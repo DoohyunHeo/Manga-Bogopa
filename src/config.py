@@ -1,17 +1,17 @@
 import torch
 
 MODEL_PATH = 'data/models/v22.pt'
-INPUT_DIR = 'data/inputs/'
+INPUT_DIR = 'data/inputs4/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
 DEBUG_CROPS_DIR = 'data/debug_crops'
-TRANSLATION_BATCH_SIZE = 100
+TRANSLATION_BATCH_SIZE = 50
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 TARGET_CLASSES = ['bubble', 'text', 'free_text']
 CLASSES_TO_ERASE = ['text', 'free_text']
 GEMINI_MODEL = 'gemini-2.5-flash'
-YOLO_CONF_THRESHOLD = 0.5
+YOLO_CONF_THRESHOLD = 0.4
 
 TEXT_MERGE_OVERLAP_THRESHOLD = 0.2
 
@@ -60,7 +60,8 @@ DEFAULT_FONT_SIZE = 20
 FONT_UPSCALE_IF_TOO_SMALL = False
 FONT_AREA_FILL_RATIO = 0.35
 
-OCR_BATCH_SIZE=64
+OCR_BATCH_SIZE=16
+FONT_MODEL_BATCH_SIZE=16
 
 
 SAVE_DEBUG_CROPS=True

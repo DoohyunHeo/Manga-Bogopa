@@ -55,7 +55,7 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     font_size_model = models['font_size']
 
     tqdm.write(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
-    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False)
+    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False, imgsz=(1344, 928))
 
     all_items_to_process = []
     all_bubbles_by_page = [[] for _ in batch_images_rgb]
@@ -122,17 +122,30 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
     for item in all_items_to_process:
         image_rgb = batch_images_rgb[item['page_idx']]
         coords = item['box'].astype(int)
-        crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
-        item['crop'] = crop_pil
-        crops_for_ocr.append(crop_pil)
+        original_crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
+        item['crop'] = original_crop_pil
+
+        ocr_crop_pil = original_crop_pil
+        was_upscaled = False
+
+        # OCR 정확도 향상을 위해 작은 이미지 업스케일링
+        if config.OCR_UPSCALE_ENABLED:
+            w, h = ocr_crop_pil.size
+            new_w = int(w * config.OCR_UPSCALE_FACTOR)
+            new_h = int(h * config.OCR_UPSCALE_FACTOR)
+            ocr_crop_pil = ocr_crop_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            was_upscaled = True
+
+        crops_for_ocr.append(ocr_crop_pil)
 
         if config.SAVE_DEBUG_CROPS:
             try:
                 page_name = os.path.splitext(os.path.basename(batch_paths[item['page_idx']]))[0]
                 x1, y1, x2, y2 = coords
-                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}.png"
+                upscaled_str = "_upscaled" if was_upscaled else ""
+                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}{upscaled_str}.png"
                 crop_path = os.path.join(config.DEBUG_CROPS_DIR, crop_filename)
-                crop_pil.save(crop_path)
+                ocr_crop_pil.save(crop_path)
             except Exception as e:
                 tqdm.write(f"경고: 디버그 크롭 저장 실패 {crop_path}: {e}")
 

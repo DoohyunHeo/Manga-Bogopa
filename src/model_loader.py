@@ -32,7 +32,7 @@ def load_all_models():
     # --- 폰트 분류 모델 로딩 ---
     font_classifier_model = None
     try:
-        checkpoint = torch.load(config.MTL_MODEL_PATH, map_location=config.DEVICE)
+        checkpoint = torch.load(config.FONT_STYLE_MODEL_PATH, map_location=config.DEVICE)
         style_mapping = checkpoint['style_mapping']
         num_classes = len(style_mapping)
         font_classifier_model = FontClassifierModel(num_classes, style_mapping)

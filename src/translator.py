@@ -41,7 +41,7 @@ def translate_pages_in_batch(chat_session, batch_page_data: List[PageData]):
                 match = re.search(r'\((.*)\)', line)
                 cleaned_text = match.group(1) if match else line.split('.', 1)[-1].strip()
                 # dataclass의 translated_text 필드를 직접 업데이트
-                item['source_element'].translated_text = cleaned_text.replace("...", "···")
+                item['source_element'].translated_text = cleaned_text.replace("...", "⋯").replace("…", "⋯")
             else:
                 item['source_element'].translated_text = ""
 

@@ -16,7 +16,7 @@ def _wrap_text(text, font, max_width):
             continue
         current_line = words[0]
         for word in words[1:]:
-            joiner = "" if re.match(r'^(·+|[!?]+)$', word) else " "
+            joiner = "" if re.match(r'^(·+|[!?⋯]+)$', word) else " "
             if font.getlength(current_line + joiner + word) <= max_width:
                 current_line += joiner + word
             else:
@@ -94,7 +94,10 @@ def _find_best_fit_font_vertical(draw, text, initial_font_size, target_height, f
     """세로 쓰기 텍스트에 맞는 최적의 폰트 크기를 찾습니다."""
     font_size = min(initial_font_size, config.MAX_FONT_SIZE)
     font = ImageFont.load_default()
-    vertical_text = "\n".join(list(text))
+    text.replace("⋯", "︙")
+    # ?나 !가 연속될 경우 한 글자로 취급하여 세로쓰기
+    tokens = re.findall(r'[!?]+|.', text)
+    vertical_text = "\n".join(tokens)
 
     # 1. 영역에 맞는 가장 큰 폰트 크기를 찾습니다.
     current_font_size = font_size
@@ -227,24 +230,77 @@ def draw_text_on_image(inpainted_image, page_data: PageData):
     # 2. 자유 텍스트 그리기
     for element in page_data.freeform_texts:
         if not element.translated_text: continue
+
+        box_width = element.text_box[2] - element.text_box[0]
+        box_height = element.text_box[3] - element.text_box[1]
+
         font_path = config.FONT_MAP.get(element.font_style, config.DEFAULT_FONT_PATH)
-        target_width = (element.text_box[2] - element.text_box[0]) * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
-        target_height = (element.text_box[3] - element.text_box[1]) * (1 + config.VERTICAL_TOLERANCE_RATIO)
+        target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
+
+        # 박스 가로가 세로보다 길면 높이 제약을 더 엄격하게 적용
+        if box_width > box_height:
+            target_height = box_height
+        else:
+            target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
+
         font, wrapped_text = _find_best_fit_font(draw, element.translated_text, element.font_size, target_width, target_height, font_path)
 
         text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
-        center_x, center_y = (element.text_box[0] + element.text_box[2]) / 2, element.text_box[1] + (text_bbox[3] - text_bbox[1]) / 2
+
+        # 텍스트 블록을 박스 상단 기준으로 위치시키도록 y 좌표 계산
+        center_x = (element.text_box[0] + element.text_box[2]) / 2
+        center_y = element.text_box[1] + (text_bbox[3] - text_bbox[1]) / 2
+
         initial_bbox = (center_x - (text_bbox[2]-text_bbox[0])/2, center_y - (text_bbox[3]-text_bbox[1])/2, center_x + (text_bbox[2]-text_bbox[0])/2, center_y + (text_bbox[3]-text_bbox[1])/2)
         adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
 
-        if abs(element.angle) > config.MIN_ROTATION_ANGLE:
-            txt_img = Image.new('RGBA', (int(text_bbox[2]), int(text_bbox[3])), (255, 255, 255, 0))
-            txt_draw = ImageDraw.Draw(txt_img)
-            txt_draw.text((0, 0), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR, stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR, align="center")
-            rotated_txt = txt_img.rotate(element.angle, expand=True, resample=Image.Resampling.BICUBIC)
-            paste_x, paste_y = int(adj_center_x - rotated_txt.width / 2), int(adj_center_y - rotated_txt.height / 2)
-            img_pil.paste(rotated_txt, (paste_x, paste_y), rotated_txt)
-        else:
+        # 2. 자유 텍스트 그리기
+    for element in page_data.freeform_texts:
+        if not element.translated_text: continue
+
+        box_width = element.text_box[2] - element.text_box[0]
+        box_height = element.text_box[3] - element.text_box[1]
+        font_path = config.FONT_MAP.get(element.font_style, config.DEFAULT_FONT_PATH)
+
+        is_vertical = config.ENABLE_VERTICAL_TEXT and ' ' not in element.translated_text and box_width > 0 or (box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD)
+
+        if is_vertical:
+            # --- 세로 쓰기 로직 ---
+            font, wrapped_text = _find_best_fit_font_vertical(draw, element.translated_text, element.font_size, box_height * (1 + config.VERTICAL_TOLERANCE_RATIO), font_path)
+
+            center_x, center_y = (element.text_box[0] + element.text_box[2]) / 2, (element.text_box[1] + element.text_box[3]) / 2
+            text_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+
+            initial_bbox = (center_x - (text_bbox[2]-text_bbox[0])/2, center_y - (text_bbox[3]-text_bbox[1])/2, center_x + (text_bbox[2]-text_bbox[0])/2, center_y + (text_bbox[3]-text_bbox[1])/2)
+            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+
             draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR, stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR, anchor="mm", align="center")
+        else:
+            # --- 가로 쓰기 로직 ---
+            target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
+            if box_width > box_height:
+                target_height = box_height
+            else:
+                target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
+
+            font, wrapped_text = _find_best_fit_font(draw, element.translated_text, element.font_size, target_width, target_height, font_path)
+
+            text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center", stroke_width=config.FREEFORM_STROKE_WIDTH)
+
+            # 텍스트 블록을 박스 상단 기준으로 위치시키도록 y 좌표 계산
+            center_x = (element.text_box[0] + element.text_box[2]) / 2
+            center_y = element.text_box[1] + (text_bbox[3] - text_bbox[1]) / 2
+            initial_bbox = (center_x - (text_bbox[2]-text_bbox[0])/2, center_y - (text_bbox[3]-text_bbox[1])/2, center_x + (text_bbox[2]-text_bbox[0])/2, center_y + (text_bbox[3]-text_bbox[1])/2)
+            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+
+            if abs(element.angle) > config.MIN_ROTATION_ANGLE:
+                txt_img = Image.new('RGBA', (int(text_bbox[2]), int(text_bbox[3])), (255, 255, 255, 0))
+                txt_draw = ImageDraw.Draw(txt_img)
+                txt_draw.text((0, 0), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR, stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR, align="center")
+                rotated_txt = txt_img.rotate(element.angle, expand=True, resample=Image.Resampling.BICUBIC)
+                paste_x, paste_y = int(adj_center_x - rotated_txt.width / 2), int(adj_center_y - rotated_txt.height / 2)
+                img_pil.paste(rotated_txt, (paste_x, paste_y), rotated_txt)
+            else:
+                draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, fill=config.FREEFORM_FONT_COLOR, stroke_width=config.FREEFORM_STROKE_WIDTH, stroke_fill=config.FREEFORM_STROKE_COLOR, anchor="mm", align="center")
 
     return np.array(img_pil)

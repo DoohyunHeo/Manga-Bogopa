@@ -52,15 +52,11 @@ class BatchMangaOcr(MangaOcr):
             inputs = self.processor(images=batch_images, return_tensors="pt").to(self.device)
 
             # FP16 추론을 위해 autocast 컨텍스트 사용
-            with torch.no_grad(), torch.autocast(device_type=self.device.type, enabled=self.device.type == 'cuda'):
-                # 모델 입력 텐서도 .half()로 변환
-                if self.device.type == 'cuda':
-                    inputs.pixel_values = inputs.pixel_values.half()
-
+            with torch.no_grad():
                 generated_ids = self.model.generate(
                     inputs.pixel_values,
                     max_length=max_length,
-                    num_beams=3,  # 약간의 성능 향상을 위해 beam search 옵션 추가 가능
+                    num_beams=5,  # 정확도를 위해 beam search 옵션 증가
                     early_stopping=True
                 )
 

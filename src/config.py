@@ -1,7 +1,7 @@
 import torch
 
-MODEL_PATH = 'data/models/v24.pt'
-INPUT_DIR = 'data/inputs6/'
+MODEL_PATH = 'data/models/v27.pt'
+INPUT_DIR = 'data/inputs/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
 DEBUG_CROPS_DIR = 'data/debug_crops'
@@ -34,21 +34,21 @@ FREEFORM_FONT_COLOR = (0, 0, 0)
 FREEFORM_STROKE_COLOR = (255, 255, 255)
 FREEFORM_STROKE_WIDTH = 2
 
-FONT_STYLE_MODEL_PATH = 'data/models/font_style_analyzer_2.pth'
+FONT_STYLE_MODEL_PATH = 'data/models/font_style_analyzer_2-v1.pth'
 FONT_SIZE_MODEL_PATH = 'data/models/font_size_predictor.pth'
 
 IMAGE_SIZE = (256, 256)
 
 FONT_MAP = {
-    "pop": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/SDSamliphopangcheTTFOutline.ttf",
-    "angry": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/a몬스터.ttf",
-    "cute": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/IM_Hyemin-Bold.ttf",
-    "embarrassment": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/87MMILSANG-Oblique.ttf",
-    "handwriting": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/NanumPen.ttf",
-    "narration": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/NanumMyeongjoBold.ttf",
-    "scared": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/흔적체.ttf",
-    "shouting": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/Pretendard-ExtraBold.otf",
-    "standard": "C:/Users/Admin/AppData/Local/Microsoft/Windows/Fonts/Pretendard-SemiBold.otf"
+    "pop": "data/fonts/SDSamliphopangcheTTFOutline.ttf",
+    "angry": "data/fonts/a몬스터.ttf",
+    "cute": "data/fonts/IM_Hyemin-Bold.ttf",
+    "embarrassment": "data/fonts/JejuHallasan.ttf",
+    "handwriting": "data/fonts/NanumPen.ttf",
+    "narration": "data/fonts/NanumMyeongjo-Bold.ttf",
+    "scared": "data/fonts/흔적체.ttf",
+    "shouting": "data/fonts/Pretendard-ExtraBold.otf",
+    "standard": "data/fonts/Pretendard-SemiBold.otf"
 }
 
 DEFAULT_FONT_PATH = FONT_MAP["standard"]
@@ -57,7 +57,7 @@ FONT_LENGTH_ADJUSTMENT = True
 MIN_FONT_SIZE = 5
 MAX_FONT_SIZE = 80
 DEFAULT_FONT_SIZE = 20
-FONT_UPSCALE_IF_TOO_SMALL = True
+FONT_UPSCALE_IF_TOO_SMALL = False
 FONT_AREA_FILL_RATIO = 0.35
 
 OCR_BATCH_SIZE=16

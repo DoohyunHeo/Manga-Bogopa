@@ -4,12 +4,6 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as transforms
-import os
-from collections import defaultdict
-import cv2
-import numpy as np
-import torch
-import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 
@@ -47,17 +41,13 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
         return 'none'
 
 
-def process_image_batch(models, batch_images_rgb, batch_paths):
-    """이미지 배치에서 텍스트, 말풍선 등의 정보를 추출하여 PageData 리스트로 반환합니다."""
-    detection_model = models['detection']
-    ocr_model = models['ocr']
-    font_classifier_model = models['font_classifier']
-    font_size_model = models['font_size']
-
+def detect_objects(detection_model, batch_images_rgb):
+    """YOLO 모델을 사용하여 이미지 내의 모든 객체를 탐지합니다."""
     tqdm.write(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
-    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False, imgsz=(1344, 928))
+    # 모델에 저장된 imgsz를 사용하고, 없을 경우 기본값으로 (800, 560)을 사용합니다.
+    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False)
 
-    all_items_to_process = []
+    all_text_items = []
     all_bubbles_by_page = [[] for _ in batch_images_rgb]
     for page_idx, results in enumerate(tqdm(batch_results, desc="Detection")):
         for box in results.boxes:
@@ -66,13 +56,17 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
             if class_name == 'bubble':
                 all_bubbles_by_page[page_idx].append(coords.astype(int))
             elif class_name in ['text', 'free_text']:
-                all_items_to_process.append({
+                all_text_items.append({
                     'page_idx': page_idx, 'box': coords, 'class_name': class_name
                 })
+    return all_text_items, all_bubbles_by_page
 
-    tqdm.write(f"-> {len(all_items_to_process)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
+
+def merge_text_boxes(text_items):
+    """탐지된 텍스트 박스 중 겹치는 것들을 병합합니다."""
+    tqdm.write(f"-> {len(text_items)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
     grouped_items = defaultdict(list)
-    for item in all_items_to_process:
+    for item in text_items:
         grouped_items[(item['page_idx'], item['class_name'])].append(item)
 
     final_items = []
@@ -81,7 +75,6 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
             final_items.extend(items)
             continue
 
-        # IoU 기반 클러스터링으로 겹치는 박스 병합
         num_items = len(items)
         adj_matrix = np.zeros((num_items, num_items))
         for i in range(num_items):
@@ -110,16 +103,23 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                     final_items.append({'page_idx': page_idx, 'box': merged_box, 'class_name': class_name})
                 else:
                     final_items.append(items[component[0]])
+    
+    tqdm.write(f"-> 병합 후 {len(final_items)}개의 객체로 정리되었습니다.")
+    return final_items
 
-    all_items_to_process = final_items
-    tqdm.write(f"-> 병합 후 {len(all_items_to_process)}개의 객체로 정리되었습니다.")
 
-    if not all_items_to_process: # 텍스트가 전혀 없으면 빈 PageData 반환
-        return [PageData(source_page=os.path.basename(p), image_rgb=img) for p, img in zip(batch_paths, batch_images_rgb)]
+def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
+    """텍스트 박스에 대해 OCR과 폰트 분석을 수행하고 TextElement 리스트를 반환합니다."""
+    if not text_items:
+        return []
+
+    ocr_model = models['ocr']
+    font_classifier_model = models['font_classifier']
+    font_size_model = models['font_size']
 
     # OCR 및 폰트 분석을 위한 크롭 이미지 준비
     crops_for_ocr = []
-    for item in all_items_to_process:
+    for item in text_items:
         image_rgb = batch_images_rgb[item['page_idx']]
         coords = item['box'].astype(int)
         original_crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
@@ -127,15 +127,12 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
 
         ocr_crop_pil = original_crop_pil
         was_upscaled = False
-
-        # OCR 정확도 향상을 위해 작은 이미지 업스케일링
         if config.OCR_UPSCALE_ENABLED:
             w, h = ocr_crop_pil.size
             new_w = int(w * config.OCR_UPSCALE_FACTOR)
             new_h = int(h * config.OCR_UPSCALE_FACTOR)
             ocr_crop_pil = ocr_crop_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
             was_upscaled = True
-
         crops_for_ocr.append(ocr_crop_pil)
 
         if config.SAVE_DEBUG_CROPS:
@@ -149,13 +146,14 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
             except Exception as e:
                 tqdm.write(f"경고: 디버그 크롭 저장 실패 {crop_path}: {e}")
 
+    # OCR 실행
     tqdm.write(f"-> {len(crops_for_ocr)}개의 텍스트 조각을 Batch OCR 처리 중...")
     all_ocr_results = ocr_model(crops_for_ocr)
 
-    # 폰트 스타일/크기/각도 예측
+    # 폰트 속성 예측
     all_props = []
     if font_classifier_model and font_size_model:
-        tqdm.write(f"-> {len(all_items_to_process)}개의 텍스트 조각을 폰트 모델로 분석 중...")
+        tqdm.write(f"-> {len(text_items)}개의 텍스트 조각을 폰트 모델로 분석 중...")
         transform = transforms.Compose([
             Letterbox(config.IMAGE_SIZE),
             transforms.ToTensor(),
@@ -163,8 +161,8 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
         ])
         
         font_batch_size = config.FONT_MODEL_BATCH_SIZE
-        for i in tqdm(range(0, len(all_items_to_process), font_batch_size), desc="Font Model"):
-            batch_items = all_items_to_process[i:i+font_batch_size]
+        for i in tqdm(range(0, len(text_items), font_batch_size), desc="Font Model"):
+            batch_items = text_items[i:i+font_batch_size]
             image_tensors = torch.stack([transform(item['crop'].convert("RGB")) for item in batch_items]).to(config.DEVICE)
             
             with torch.no_grad():
@@ -175,7 +173,11 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                 pred_sizes_np = pred_sizes.cpu().numpy()
 
             for j in range(len(batch_items)):
-                style_idx = int(pred_style_indices[j])
+                if 0 in font_classifier_model.style_mapping:
+                    style_idx = int(pred_style_indices[j])
+                else:
+                    style_idx = str(pred_style_indices[j])
+
                 style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
                 all_props.append({
                     'font_size': int(round(pred_sizes_np[j])),
@@ -183,11 +185,11 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                     'font_style': style_name
                 })
     else:
-        all_props = [{'font_size': 20, 'angle': 0.0, 'font_style': 'standard'}] * len(all_items_to_process)
+        all_props = [{'font_size': 20, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
 
-    # 최종적으로 처리된 TextElement 객체 생성
+    # TextElement 객체 생성
     processed_text_elements = []
-    for i, item in enumerate(all_items_to_process):
+    for i, item in enumerate(text_items):
         if all_ocr_results[i]:
             element = TextElement(
                 text_box=item['box'].tolist(),
@@ -195,8 +197,12 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                 **all_props[i]
             )
             processed_text_elements.append({'element': element, 'page_idx': item['page_idx'], 'class_name': item['class_name']})
+    
+    return processed_text_elements
 
-    # PageData 객체 구성
+
+def structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements):
+    """탐지된 정보들을 기반으로 최종 PageData 객체 리스트를 구성합니다."""
     batch_page_data = []
     for page_idx, path in enumerate(batch_paths):
         page_data = PageData(source_page=os.path.basename(path), image_rgb=batch_images_rgb[page_idx])
@@ -211,7 +217,6 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
         for bubble_box in page_bubbles:
             bubble_center = ((bubble_box[0] + bubble_box[2]) / 2, (bubble_box[1] + bubble_box[3]) / 2)
             
-            # 1. 'text' 클래스와의 거리 기반 매칭
             closest_text_idx, min_distance = -1, float('inf')
             for j, text_info in enumerate(page_text_elements):
                 if j in unmatched_text_indices:
@@ -225,14 +230,12 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                 matched_element = page_text_elements[closest_text_idx]['element']
                 unmatched_text_indices.remove(closest_text_idx)
             else:
-                # 2. 매칭되는 'text'가 없으면, 버블 안에 포함되는 'free_text' 탐색
                 found_free_text_idx = -1
                 for j in unmatched_free_text_indices:
                     free_text_element = page_free_texts[j]
                     if is_box_inside(free_text_element.text_box, bubble_box):
                         found_free_text_idx = j
                         break
-                
                 if found_free_text_idx != -1:
                     matched_element = page_free_texts[found_free_text_idx]
                     unmatched_free_text_indices.remove(found_free_text_idx)
@@ -249,8 +252,24 @@ def process_image_batch(models, batch_images_rgb, batch_paths):
                 )
                 page_data.speech_bubbles.append(speech_bubble)
 
-        # 남은 free_text들을 page_data에 추가
         page_data.freeform_texts = [page_free_texts[i] for i in sorted(list(unmatched_free_text_indices))]
         batch_page_data.append(page_data)
+
+    return batch_page_data
+
+
+def process_image_batch(models, batch_images_rgb, batch_paths):
+    """이미지 배치에서 텍스트, 말풍선 등의 정보를 추출하여 PageData 리스트로 반환합니다."""
+    # 1. 객체 탐지
+    all_text_items, all_bubbles_by_page = detect_objects(models['detection'], batch_images_rgb)
+
+    # 2. 텍스트 박스 병합
+    merged_text_items = merge_text_boxes(all_text_items)
+    
+    # 3. 텍스트 속성 추출 (OCR, 폰트)
+    processed_text_elements = extract_text_properties(models, batch_images_rgb, merged_text_items, batch_paths)
+
+    # 4. 최종 데이터 구조화
+    batch_page_data = structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements)
 
     return batch_page_data

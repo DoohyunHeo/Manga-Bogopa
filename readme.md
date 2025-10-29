@@ -48,9 +48,25 @@ Manga-Bogopa/
 pip install -r requirements.txt
 ```
 
-**다. 모델 및 폰트 다운로드**
+**다. 폰트 준비**
 
-`data/models`와 `data/fonts` 폴더에 필요한 AI 모델 파일과 폰트 파일을 위치시켜야 합니다. (모델 및 폰트 파일은 별도로 제공되어야 합니다.)
+번역된 텍스트를 그리기 위해 폰트 파일이 반드시 필요합니다.
+
+1.  `data/fonts` 폴더에 사용할 폰트 파일(.ttf, .otf)을 위치시킵니다.
+2.  `src/config.py` 파일의 `FONT_MAP` 딕셔너리를 열어, 폰트 스타일 이름과 실제 폰트 파일 경로를 연결해줍니다.
+
+    ```python
+    # src/config.py 예시
+    FONT_MAP = {
+        "narration": "data/fonts/NanumMyeongjo-Bold.ttf",
+        "shouting": "data/fonts/Pretendard-ExtraBold.otf",
+        # 다른 폰트 스타일...
+    }
+    ```
+
+**라. 모델 다운로드**
+
+`data/models` 폴더에 필요한 AI 모델 파일을 위치시켜야 합니다. 모델 파일은 프로젝트의 GitHub Releases 페이지에서 다운로드할 수 있습니다.
 
 ### 2. 실행
 
@@ -77,6 +93,10 @@ python main.py
 - `INPUT_DIR`, `OUTPUT_DIR`: 입/출력 폴더 경로
 - `YOLO_CONF_THRESHOLD`: 객체 탐지 최소 신뢰도
 - `GEMINI_MODEL`: 사용할 Gemini 모델 버전
-- `FONT_MAP`: 폰트 스타일과 실제 폰트 파일 경로 매핑
+- `FONT_MAP`: `src/config.py`의 `FONT_MAP` 딕셔너리에서 특정 폰트 스타일(예: 'narration', 'shouting')에 사용할 폰트 파일(.ttf, .otf)의 경로를 지정하거나 수정할 수 있습니다.
 - `DRAW_DEBUG_BOXES`: 결과 이미지에 탐지 영역 박스를 표시할지 여부 (디버깅용)
 
+## 향후 계획
+
+- **GUI 프론트엔드 개발**: 사용자가 더 쉽게 파이프라인을 이용할 수 있도록 그래픽 사용자 인터페이스(GUI)를 개발할 예정입니다.
+- **식자 기능 고도화**: 텍스트 배치, 폰트 크기 자동 조절, 스타일 적용 등을 개선하여 더 자연스러운 식자 결과를 만들 계획입니다.

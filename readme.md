@@ -38,7 +38,7 @@ Manga-Bogopa/
 
 **가. API 키 설정**
 
-프로젝트 루트 디렉토리에 `api_key.txt` 파일을 생성하고, 파일 안에 Google Gemini API 키를 입력하세요.
+프로젝트 루트 디렉토리에 존재하는 `api_key.txt` 파일 안에 Google Gemini API 키를 입력하세요.
 
 **나. 필요 라이브러리 설치**
 

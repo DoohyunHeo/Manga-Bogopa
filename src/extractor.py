@@ -1,303 +1,275 @@
 import os
-import re
+from collections import defaultdict
 import cv2
-import pytesseract
-import google.generativeai as genai
 import numpy as np
-import tensorflow as tf
-from ultralytics import YOLO
-from manga_ocr import MangaOcr
+import torch
+import torchvision.transforms as transforms
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor
+from tqdm import tqdm
+
 from src import config
-
-FONT_CLASS_NAMES = ['bold', 'confused', 'handwriting', 'narration', 'sad', 'shouting', 'standard']
-
-
-def initialize_models_and_session():
-    """AI 모델들을 로드하고 제미나이 챗 세션을 초기화합니다."""
-    print("AI 모델 및 챗 세션을 초기화합니다...")
-    try:
-        with open(config.API_KEY_FILE, 'r') as f:
-            api_key = f.read().strip()
-        genai.configure(api_key=api_key)
-    except FileNotFoundError:
-        raise FileNotFoundError(f"'{config.API_KEY_FILE}'을 찾을 수 없습니다.")
-
-    with open(config.SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
-        system_prompt = f.read()
-
-    detection_model = YOLO(config.MODEL_PATH)
-    detection_model.to(config.DEVICE)
-    ocr_model = MangaOcr()
-
-    try:
-        font_classifier_model = tf.keras.models.load_model(config.FONT_CLASSIFIER_PATH)
-        print("폰트 분류 모델을 성공적으로 로드했습니다.")
-    except Exception as e:
-        print(f"경고: 폰트 분류 모델 로드 실패. 기본 스타일만 사용됩니다. -> {e}")
-        font_classifier_model = None
-
-    translation_model = genai.GenerativeModel(config.GEMINI_MODEL)
-    chat_session = translation_model.start_chat(history=[
-        {'role': 'user', 'parts': [system_prompt]},
-        {'role': 'model', 'parts': ["네, 알겠습니다. 이제부터 지시에 따라 번역을 시작하겠습니다."]},
-    ])
-
-    print("초기화 완료.")
-    return detection_model, ocr_model, chat_session, font_classifier_model
-
-
-def _is_kana(char):
-    """주어진 문자가 히라가나 또는 가타카나인지 확인합니다."""
-    if len(char) != 1:
-        return False
-    return 0x3040 <= ord(char) <= 0x309F or 0x30A0 <= ord(char) <= 0x30FF
-
-
-def _calculate_font_size(cropped_pil_image):
-    """Tesseract로 측정한 문자 픽셀 높이를 기반으로 폰트 크기를 직접 계산합니다."""
-    try:
-        img = np.array(cropped_pil_image)
-        h, w = img.shape[:2]
-
-        lang, psm = ('jpn', '7') if w > h else ('jpn_vert', '5')
-        config_str = f'--psm {psm}'
-
-        img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        scale = 2 if w < 100 or h < 100 else 1
-        if scale > 1:
-            img_gray = cv2.resize(img_gray, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-
-        boxes_data = pytesseract.image_to_boxes(img_gray, lang=lang, config=config_str)
-
-        lines = boxes_data.strip().splitlines()
-        if not lines: return 0
-
-        char_heights = [abs(int(line.split()[4]) - int(line.split()[2])) for line in lines if
-                        len(line.split()) == 6 and _is_kana(line.split()[0])]
-        if not char_heights: return 0
-
-        avg_box_height_px = (sum(char_heights) / len(char_heights)) / scale
-        return avg_box_height_px * config.FONT_SCALE_FACTOR
-
-    except Exception as e:
-        print(f"    -> Tesseract 오류: {e}")
-        return 0
+from src.utils import Letterbox, calculate_iou, merge_boxes, is_box_inside
+from src.data_models import PageData, TextElement, SpeechBubble
 
 
 def check_bubble_attachment(cropped_bubble_image_rgb):
-    """
-    말풍선이 컷에 붙어있는지 확인합니다.
-    """
+    """잘라낸 말풍선 이미지를 분석하여 말꼬리의 방향을 판단합니다."""
     try:
         img = cropped_bubble_image_rgb
         img_h, img_w = img.shape[:2]
-
         scan_width = int(img_w * 0.10)
         if scan_width == 0: return 'none'
 
         left_crop = img[:, :scan_width]
         right_crop = img[:, -scan_width:]
-
         threshold = config.BUBBLE_ATTACHMENT_THRESHOLD
-        has_left_vertical_line = False
-        has_right_vertical_line = False
 
-        # --- 왼쪽 영역 검사 ---
         gray_left = cv2.cvtColor(left_crop, cv2.COLOR_RGB2GRAY)
         edges_left = cv2.Canny(gray_left, 50, 150)
-        lines_left = cv2.HoughLinesP(edges_left, 1, np.pi / 180, threshold=10,
-                                     minLineLength=img_h * 0.8, maxLineGap=10)
+        lines_left = cv2.HoughLinesP(edges_left, 1, np.pi / 180, threshold=10, minLineLength=img_h * 0.8, maxLineGap=10)
+        has_left_vertical_line = any(abs(l[0] - l[2]) < threshold and l[0] < threshold for l in lines_left[0]) if lines_left is not None else False
 
-        if lines_left is not None:
-            for line in lines_left:
-                x1, y1, x2, y2 = line[0]
-                if abs(x1 - x2) < threshold:
-                    if x1 < threshold:
-                        has_left_vertical_line = True
-                        break
-
-        # --- 오른쪽 영역 검사 ---
         gray_right = cv2.cvtColor(right_crop, cv2.COLOR_RGB2GRAY)
         edges_right = cv2.Canny(gray_right, 50, 150)
-        lines_right = cv2.HoughLinesP(edges_right, 1, np.pi / 180, threshold=10,
-                                      minLineLength=img_h * 0.8, maxLineGap=10)
+        lines_right = cv2.HoughLinesP(edges_right, 1, np.pi / 180, threshold=10, minLineLength=img_h * 0.8, maxLineGap=10)
+        has_right_vertical_line = any(abs(l[0] - l[2]) < threshold and l[0] > scan_width - threshold for l in lines_right[0]) if lines_right is not None else False
 
-        if lines_right is not None:
-            for line in lines_right:
-                x1, y1, x2, y2 = line[0]
-                if abs(x1 - x2) < threshold:
-                    if x1 > scan_width - threshold:
-                        has_right_vertical_line = True
-                        break
-
-        # --- 최종 판단 ---
-        if has_right_vertical_line and not has_left_vertical_line:
-            return 'right'
-        if has_left_vertical_line and not has_right_vertical_line:
-            return 'left'
-
+        if has_right_vertical_line and not has_left_vertical_line: return 'right'
+        if has_left_vertical_line and not has_right_vertical_line: return 'left'
         return 'none'
     except Exception:
         return 'none'
 
 
-def structure_page_data(models, image_rgb, page_identifier, detection_results):
-    _, ocr_model, _, font_classifier = models
-    print(f"  -> [{page_identifier}] 탐지 결과 구조화 시작...")
+def detect_objects(detection_model, batch_images_rgb):
+    """YOLO 모델을 사용하여 이미지 내의 모든 객체를 탐지합니다."""
+    tqdm.write(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
+    # 모델에 저장된 imgsz를 사용하고, 없을 경우 기본값으로 (800, 560)을 사용합니다.
+    batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False)
 
-    boxes = detection_results.boxes
-    class_names = detection_results.names
-
-    safe_subdir_name = page_identifier.replace('.', '_')
-    page_debug_dir = os.path.join(config.DEBUG_CROPS_DIR, safe_subdir_name)
-    os.makedirs(page_debug_dir, exist_ok=True)
-
-    bubble_boxes = []
-    text_boxes_with_info = []
-    freeform_texts = []
-
-    # 1. OCR, 폰트 계산/분류 병렬 처리를 위한 작업 목록 생성
-    items_to_process = []
-    for i, box in enumerate(boxes):
-        class_id = int(box.cls[0])
-        class_name = class_names[class_id]
-        coords = box.xyxy[0].cpu().numpy().astype(int)
-        if class_name == 'bubble':
-            bubble_boxes.append(coords)
-        elif class_name in config.TARGET_CLASSES:
-            cropped_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
-            items_to_process.append({'crop': cropped_pil, 'box': coords, 'class_name': class_name, 'crop_idx': i})
-
-    def _process_item(item):
-        ocr_text = ocr_model(item['crop'])
-        font_size = _calculate_font_size(item['crop'])
-        font_style = 'standard'
-        if font_classifier and ocr_text:
-            img_array = tf.image.resize(np.array(item['crop']), (96, 96))
-            img_array = tf.expand_dims(img_array, 0)
-            predictions = font_classifier.predict(img_array, verbose=0)
-            font_style = config.FONT_CLASS_NAMES[np.argmax(predictions[0])]
-        return ocr_text, font_size, font_style, item
-
-    # 2. 병렬 처리 실행 및 결과 수집
-    print(f"  -> {len(items_to_process)}개의 텍스트 조각을 병렬 처리 중...")
-    with ThreadPoolExecutor() as executor:
-        results = executor.map(_process_item, items_to_process)
-
-    for ocr_text, font_size, font_style, source_item in results:
-        if ocr_text:
-            coords, class_name = source_item['box'], source_item['class_name']
-            if config.SAVE_DEBUG_CROPS:
-                crop_filename = f"crop_{source_item['crop_idx']}_{class_name}.png"
-                source_item['crop'].save(os.path.join(page_debug_dir, crop_filename))
-
-            base_font_size = font_size if font_size > 0 else (coords[3] - coords[1])
-            final_font_size = int(max(config.MIN_FONT_SIZE, min(base_font_size, config.MAX_FONT_SIZE)))
-            item_data = {"original_text": ocr_text, "font_size": final_font_size, "font_style": font_style}
-
-            if class_name == 'free_text':
-                item_data["text_box"] = coords.tolist()
-                freeform_texts.append(item_data)
-            else:
-                item_data.update({'box': coords})
-                text_boxes_with_info.append(item_data)
-
-    # 3. 말풍선과 텍스트 1:1 매칭
-    structured_bubbles = []
-    unmatched_text_indices = set(range(len(text_boxes_with_info)))
-    for i, bubble_box in enumerate(bubble_boxes):
-        bubble_center_x, bubble_center_y = (bubble_box[0] + bubble_box[2]) / 2, (bubble_box[1] + bubble_box[3]) / 2
-        closest_text_idx, min_distance = -1, float('inf')
-
-        for j, text_info in enumerate(text_boxes_with_info):
-            if j in unmatched_text_indices:
-                text_box = text_info['box']
-                text_center_x, text_center_y = (text_box[0] + text_box[2]) / 2, (text_box[1] + text_box[3]) / 2
-                distance = np.sqrt((bubble_center_x - text_center_x) ** 2 + (bubble_center_y - text_center_y) ** 2)
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_text_idx = j
-
-        if closest_text_idx != -1:
-            matched_text_info = text_boxes_with_info[closest_text_idx]
-            cropped_bubble = image_rgb[bubble_box[1]:bubble_box[3], bubble_box[0]:bubble_box[2]]
-
-            current_bubble = {
-                "bubble_box": bubble_box.tolist(),
-                "text_box": matched_text_info['box'].tolist(),
-                "original_text": matched_text_info['original_text'],
-                "font_size": matched_text_info['font_size'],
-                "font_style": matched_text_info['font_style'],
-                "attachment": check_bubble_attachment(cropped_bubble)
-            }
-            structured_bubbles.append(current_bubble)
-            unmatched_text_indices.remove(closest_text_idx)
-
-    print(f"  -> 총 {len(structured_bubbles)}개의 말풍선과 {len(freeform_texts)}개의 자유 텍스트 구조화 완료.")
-    return {"source_page": page_identifier, "speech_bubbles": structured_bubbles, "freeform_texts": freeform_texts}
-
-
-def translate_image_batch(chat_session, batch_page_data):
-    """여러 페이지의 데이터를 받아, 모든 텍스트를 모아 단 한 번의 API 호출로 번역합니다."""
-    print(f"{len(batch_page_data)} 페이지의 데이터 전체 번역을 시작합니다...")
-
-    all_texts_to_translate = []
-    for page_idx, page_data in enumerate(batch_page_data):
-        for item in page_data['speech_bubbles']:
-            if item.get('original_text'):
-                all_texts_to_translate.append({
-                    "page_idx": page_idx,
-                    "source_item": item,
-                    "text": item.get('original_text')
+    all_text_items = []
+    all_bubbles_by_page = [[] for _ in batch_images_rgb]
+    for page_idx, results in enumerate(tqdm(batch_results, desc="Detection")):
+        for box in results.boxes:
+            class_name = results.names[int(box.cls[0])]
+            coords = box.xyxy[0].cpu().numpy()
+            if class_name == 'bubble':
+                all_bubbles_by_page[page_idx].append(coords.astype(int))
+            elif class_name in ['text', 'free_text']:
+                all_text_items.append({
+                    'page_idx': page_idx, 'box': coords, 'class_name': class_name
                 })
-        for item in page_data['freeform_texts']:
-            if item.get('original_text'):
-                all_texts_to_translate.append({
-                    "page_idx": page_idx,
-                    "source_item": item,
-                    "text": item.get('original_text')
-                })
+    return all_text_items, all_bubbles_by_page
 
-    if not all_texts_to_translate:
-        print("번역할 텍스트가 없습니다.")
-        return batch_page_data
 
-    formatted_request_text = ""
-    for i, item in enumerate(all_texts_to_translate):
-        formatted_request_text += f"{item['page_idx'] + 1}.{i + 1}.({item['text']})\n"
+def merge_text_boxes(text_items):
+    """탐지된 텍스트 박스 중 겹치는 것들을 병합합니다."""
+    tqdm.write(f"-> {len(text_items)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
+    grouped_items = defaultdict(list)
+    for item in text_items:
+        grouped_items[(item['page_idx'], item['class_name'])].append(item)
 
-    try:
-        prompt = formatted_request_text.strip()
-        response = chat_session.send_message(prompt)
+    final_items = []
+    for (page_idx, class_name), items in grouped_items.items():
+        if len(items) < 2:
+            final_items.extend(items)
+            continue
 
-        print("\n--- 통합 번역 결과 ---")
-        print(f">> 요청:\n{prompt}")
-        print(f"\n>> 응답:\n{response.text.strip()}")
+        num_items = len(items)
+        adj_matrix = np.zeros((num_items, num_items))
+        for i in range(num_items):
+            for j in range(i + 1, num_items):
+                iou = calculate_iou(items[i]['box'], items[j]['box'])
+                if iou > config.TEXT_MERGE_OVERLAP_THRESHOLD:
+                    adj_matrix[i, j] = adj_matrix[j, i] = 1
 
-        translated_lines = response.text.strip().split('\n')
-
-        for i, item_to_translate in enumerate(all_texts_to_translate):
-            if i < len(translated_lines):
-                line = translated_lines[i]
-                match = re.search(r'\((.*)\)', line)
-                if match:
-                    cleaned_line = match.group(1)
+        visited = [False] * num_items
+        for i in range(num_items):
+            if not visited[i]:
+                component = []
+                q = [i]
+                visited[i] = True
+                while q:
+                    u = q.pop(0)
+                    component.append(u)
+                    for v in range(num_items):
+                        if adj_matrix[u, v] and not visited[v]:
+                            visited[v] = True
+                            q.append(v)
+                
+                if len(component) > 1:
+                    cluster_items = [items[k] for k in component]
+                    merged_box = merge_boxes([item['box'] for item in cluster_items])
+                    final_items.append({'page_idx': page_idx, 'box': merged_box, 'class_name': class_name})
                 else:
-                    parts = line.split('.', 2)
-                    cleaned_line = parts[2].strip() if len(parts) > 2 else line
+                    final_items.append(items[component[0]])
+    
+    tqdm.write(f"-> 병합 후 {len(final_items)}개의 객체로 정리되었습니다.")
+    return final_items
 
-                final_text = cleaned_line.replace("...", "···")
 
-                item_to_translate['source_item']['translated_text'] = final_text
+def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
+    """텍스트 박스에 대해 OCR과 폰트 분석을 수행하고 TextElement 리스트를 반환합니다."""
+    if not text_items:
+        return []
+
+    ocr_model = models['ocr']
+    font_classifier_model = models['font_classifier']
+    font_size_model = models['font_size']
+
+    # OCR 및 폰트 분석을 위한 크롭 이미지 준비
+    crops_for_ocr = []
+    for item in text_items:
+        image_rgb = batch_images_rgb[item['page_idx']]
+        coords = item['box'].astype(int)
+        original_crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
+        item['crop'] = original_crop_pil
+
+        ocr_crop_pil = original_crop_pil
+        was_upscaled = False
+        if config.OCR_UPSCALE_ENABLED:
+            w, h = ocr_crop_pil.size
+            new_w = int(w * config.OCR_UPSCALE_FACTOR)
+            new_h = int(h * config.OCR_UPSCALE_FACTOR)
+            ocr_crop_pil = ocr_crop_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            was_upscaled = True
+        crops_for_ocr.append(ocr_crop_pil)
+
+        if config.SAVE_DEBUG_CROPS:
+            try:
+                page_name = os.path.splitext(os.path.basename(batch_paths[item['page_idx']]))[0]
+                x1, y1, x2, y2 = coords
+                upscaled_str = "_upscaled" if was_upscaled else ""
+                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}{upscaled_str}.png"
+                crop_path = os.path.join(config.DEBUG_CROPS_DIR, crop_filename)
+                ocr_crop_pil.save(crop_path)
+            except Exception as e:
+                tqdm.write(f"경고: 디버그 크롭 저장 실패 {crop_path}: {e}")
+
+    # OCR 실행
+    tqdm.write(f"-> {len(crops_for_ocr)}개의 텍스트 조각을 Batch OCR 처리 중...")
+    all_ocr_results = ocr_model(crops_for_ocr)
+
+    # 폰트 속성 예측
+    all_props = []
+    if font_classifier_model and font_size_model:
+        tqdm.write(f"-> {len(text_items)}개의 텍스트 조각을 폰트 모델로 분석 중...")
+        transform = transforms.Compose([
+            Letterbox(config.IMAGE_SIZE),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        
+        font_batch_size = config.FONT_MODEL_BATCH_SIZE
+        for i in tqdm(range(0, len(text_items), font_batch_size), desc="Font Model"):
+            batch_items = text_items[i:i+font_batch_size]
+            image_tensors = torch.stack([transform(item['crop'].convert("RGB")) for item in batch_items]).to(config.DEVICE)
+            
+            with torch.no_grad():
+                outputs_classifier = font_classifier_model(image_tensors)
+                pred_sizes = font_size_model(image_tensors)
+                pred_angles = outputs_classifier['angle'].cpu().numpy()
+                pred_style_indices = torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy()
+                pred_sizes_np = pred_sizes.cpu().numpy()
+
+            for j in range(len(batch_items)):
+                if 0 in font_classifier_model.style_mapping:
+                    style_idx = int(pred_style_indices[j])
+                else:
+                    style_idx = str(pred_style_indices[j])
+
+                style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
+                all_props.append({
+                    'font_size': int(round(pred_sizes_np[j])),
+                    'angle': int(pred_angles[j]),
+                    'font_style': style_name
+                })
+    else:
+        all_props = [{'font_size': 20, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
+
+    # TextElement 객체 생성
+    processed_text_elements = []
+    for i, item in enumerate(text_items):
+        if all_ocr_results[i]:
+            element = TextElement(
+                text_box=item['box'].tolist(),
+                original_text=all_ocr_results[i],
+                **all_props[i]
+            )
+            processed_text_elements.append({'element': element, 'page_idx': item['page_idx'], 'class_name': item['class_name']})
+    
+    return processed_text_elements
+
+
+def structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements):
+    """탐지된 정보들을 기반으로 최종 PageData 객체 리스트를 구성합니다."""
+    batch_page_data = []
+    for page_idx, path in enumerate(batch_paths):
+        page_data = PageData(source_page=os.path.basename(path), image_rgb=batch_images_rgb[page_idx])
+        page_bubbles = all_bubbles_by_page[page_idx]
+
+        page_text_elements = [item for item in processed_text_elements if item['page_idx'] == page_idx and item['class_name'] == 'text']
+        page_free_texts = [item['element'] for item in processed_text_elements if item['page_idx'] == page_idx and item['class_name'] == 'free_text']
+        
+        unmatched_text_indices = set(range(len(page_text_elements)))
+        unmatched_free_text_indices = set(range(len(page_free_texts)))
+
+        for bubble_box in page_bubbles:
+            bubble_center = ((bubble_box[0] + bubble_box[2]) / 2, (bubble_box[1] + bubble_box[3]) / 2)
+            
+            closest_text_idx, min_distance = -1, float('inf')
+            for j, text_info in enumerate(page_text_elements):
+                if j in unmatched_text_indices:
+                    text_center = ((text_info['element'].text_box[0] + text_info['element'].text_box[2]) / 2, (text_info['element'].text_box[1] + text_info['element'].text_box[3]) / 2)
+                    distance = np.sqrt((bubble_center[0] - text_center[0]) ** 2 + (bubble_center[1] - text_center[1]) ** 2)
+                    if distance < min_distance:
+                        min_distance, closest_text_idx = distance, j
+            
+            matched_element = None
+            if closest_text_idx != -1:
+                matched_element = page_text_elements[closest_text_idx]['element']
+                unmatched_text_indices.remove(closest_text_idx)
             else:
-                item_to_translate['source_item']['translated_text'] = ""
+                found_free_text_idx = -1
+                for j in unmatched_free_text_indices:
+                    free_text_element = page_free_texts[j]
+                    if is_box_inside(free_text_element.text_box, bubble_box):
+                        found_free_text_idx = j
+                        break
+                if found_free_text_idx != -1:
+                    matched_element = page_free_texts[found_free_text_idx]
+                    unmatched_free_text_indices.remove(found_free_text_idx)
 
-    except Exception as e:
-        print(f"통합 번역 중 오류 발생: {e}")
-        for item_to_translate in all_texts_to_translate:
-            item_to_translate['source_item']['translated_text'] = ""
+            if matched_element:
+                b = bubble_box
+                cropped_bubble_rgb = page_data.image_rgb[b[1]:b[3], b[0]:b[2]]
+                attachment = check_bubble_attachment(cropped_bubble_rgb)
+                
+                speech_bubble = SpeechBubble(
+                    bubble_box=b.tolist(),
+                    text_element=matched_element,
+                    attachment=attachment
+                )
+                page_data.speech_bubbles.append(speech_bubble)
 
-    print("\n번역 완료.")
+        page_data.freeform_texts = [page_free_texts[i] for i in sorted(list(unmatched_free_text_indices))]
+        batch_page_data.append(page_data)
+
+    return batch_page_data
+
+
+def process_image_batch(models, batch_images_rgb, batch_paths):
+    """이미지 배치에서 텍스트, 말풍선 등의 정보를 추출하여 PageData 리스트로 반환합니다."""
+    # 1. 객체 탐지
+    all_text_items, all_bubbles_by_page = detect_objects(models['detection'], batch_images_rgb)
+
+    # 2. 텍스트 박스 병합
+    merged_text_items = merge_text_boxes(all_text_items)
+    
+    # 3. 텍스트 속성 추출 (OCR, 폰트)
+    processed_text_elements = extract_text_properties(models, batch_images_rgb, merged_text_items, batch_paths)
+
+    # 4. 최종 데이터 구조화
+    batch_page_data = structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements)
+
     return batch_page_data

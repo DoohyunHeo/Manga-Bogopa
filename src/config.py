@@ -1,6 +1,6 @@
 import torch
 
-MODEL_PATH = 'data/models/v27.pt'
+MODEL_PATH = 'data/models/MangaTextExtractor-V1.pt'
 INPUT_DIR = 'data/inputs/'
 SYSTEM_PROMPT_PATH = 'prompt.txt'
 API_KEY_FILE = 'api_key.txt'
@@ -34,7 +34,7 @@ FREEFORM_FONT_COLOR = (0, 0, 0)
 FREEFORM_STROKE_COLOR = (255, 255, 255)
 FREEFORM_STROKE_WIDTH = 2
 
-FONT_STYLE_MODEL_PATH = 'data/models/font_style_analyzer_2-v1.pth'
+FONT_STYLE_MODEL_PATH = 'data/models/font_style_analyzer.pth'
 FONT_SIZE_MODEL_PATH = 'data/models/font_size_predictor.pth'
 
 IMAGE_SIZE = (256, 256)

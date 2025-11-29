@@ -5,7 +5,7 @@ Manga-Bogopa는 만화 이미지 속의 텍스트를 자동으로 감지하고, 
 ## 주요 기능
 
 - **텍스트 영역 감지**: Manga Dialogue Extractor(YOLO 기반) 모델을 사용하여 이미지에서 말풍선과 텍스트 영역을 찾습니다.
-- **텍스트 속성 분석**: OCR로 텍스트를 추출하고, AI 모델로 폰트 스타일, 크기, 각도 등을 분석합니다.
+- **텍스트 속성 분석**: [PaddleOCR-VL-For-Manga](https://huggingface.co/jzhang533/PaddleOCR-VL-For-Manga)를 사용해 텍스트를 추출하고, AI 모델로 폰트 스타일, 크기, 각도 등을 분석합니다.
 - **번역**: Google Gemini API를 이용해 추출된 텍스트를 한국어로 번역합니다.
 - **텍스트 제거**: LaMa 인페인팅 모델로 원본 텍스트 영역을 지웁니다.
 - **식자**: 분석된 폰트 스타일을 바탕으로 번역된 텍스트를 이미지에 다시 그립니다.
@@ -47,6 +47,8 @@ Manga-Bogopa/
 ```bash
 pip install -r requirements.txt
 ```
+
+처음 실행 시 PaddleOCR-VL-For-Manga 가중치는 Hugging Face에서 자동으로 다운로드됩니다. 방화벽이나 프록시 환경이라면 `huggingface-cli login` 또는 미러 저장소를 사용하도록 설정해주세요.
 
 **다. 폰트 준비**
 

@@ -1,68 +1,174 @@
+from __future__ import annotations
+
+import inspect
+from typing import List, Sequence
+
 import torch
-from manga_ocr import MangaOcr
-from transformers import AutoTokenizer
-import sys
-from tqdm import tqdm
+from PIL import Image
+from transformers import AutoModelForCausalLM, AutoProcessor
+
+from src import config
 
 
-class BatchMangaOcr(MangaOcr):
-    def __init__(self, model_name="kha-white/manga-ocr-base", device=None, batch_size=64):
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.batch_size = batch_size
+class BatchMangaOcr:
+    """Batch inference helper that wraps PaddleOCR-VL-For-Manga."""
 
-        super().__init__(model_name, force_cpu=False)  # force_cpu=False로 명시적 GPU 사용
+    def __init__(
+        self,
+        model_id: str | None = None,
+        processor_id: str | None = None,
+        batch_size: int | None = None,
+        max_new_tokens: int | None = None,
+    ):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.batch_size = batch_size or config.OCR_BATCH_SIZE
+        self.max_new_tokens = max_new_tokens or config.PADDLE_OCR_MAX_NEW_TOKENS
 
-        # 모델을 지정된 디바이스로 이동
-        self.model.to(self.device)
+        self.model = self._load_model(model_id or config.PADDLE_OCR_MODEL_ID)
+        self.processor = AutoProcessor.from_pretrained(
+            processor_id or config.PADDLE_OCR_PROCESSOR_ID,
+            trust_remote_code=True,
+        )
 
-        # 1. FP16 (혼합 정밀도) 적용 (CUDA 사용 시)
-        if self.device.type == 'cuda':
-            print("BatchMangaOcr: FP16 (혼합 정밀도) 추론을 활성화합니다.")
-            self.model = self.model.half()
+        if self.model.generation_config.pad_token_id is None:
+            tokenizer = getattr(self.processor, "tokenizer", None)
+            if tokenizer and tokenizer.eos_token_id is not None:
+                self.model.generation_config.pad_token_id = tokenizer.eos_token_id
 
-        # 2. torch.compile() 적용 (PyTorch 2.0+ 권장)
-        # torch 버전 확인
-        torch_version = torch.__version__
-        if sys.platform != 'darwin' and int(torch_version.split('.')[0]) >= 2:
-            print(f"BatchMangaOcr: torch.compile()을 적용합니다. (PyTorch 버전: {torch_version})")
-            # mode="reduce-overhead"는 작은 배치 크기에서 오버헤드를 줄여줌
-            self.model = torch.compile(self.model, mode="reduce-overhead")
+        self.prompt = config.PADDLE_OCR_TASK_PROMPT
+        self._forward_arg_names = None
+        self._forward_accepts_kwargs = False
+        self._ignored_input_keys = set()
 
-        # __init__에서 한 번만 로드
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        print(f"BatchMangaOcr 초기화 완료. (Device: {self.device}, Batch Size: {self.batch_size})")
+    def __call__(self, images):
+        """Allow class instances to be called like a function."""
+        if isinstance(images, list):
+            return self.ocr_batch(images)
+        return self.ocr_batch([images])[0]
 
-    def __call__(self, image_list):
-        if isinstance(image_list, list):
-            return self.ocr_batch(image_list)
-        # 단일 이미지는 기존 로직을 따르되, FP16을 위해 autocast 추가
-        if self.device.type == 'cuda':
-            with torch.autocast(device_type=self.device.type):
-                return super().__call__(image_list)
-        else:
-            return super().__call__(image_list)
+    def ocr_batch(self, images: Sequence[Image.Image]) -> List[str]:
+        """Runs OCR on a batch of PIL images."""
+        if not images:
+            return []
 
-    def ocr_batch(self, image_list, max_length=128):
-        results = []
-        # 생성자에서 받은 self.batch_size 사용
-        for i in tqdm(range(0, len(image_list), self.batch_size), desc="OCR"):
-            batch_images = image_list[i:i + self.batch_size]
-
-            # processor는 내부적으로 이미지 리사이즈 및 텐서 변환을 수행
-            inputs = self.processor(images=batch_images, return_tensors="pt").to(self.device)
-
-            # FP16 추론을 위해 autocast 컨텍스트 사용
-            with torch.no_grad():
-                generated_ids = self.model.generate(
-                    inputs.pixel_values,
-                    max_length=max_length,
-                    num_beams=5,  # 정확도를 위해 beam search 옵션 증가
-                    early_stopping=True
-                )
-
-            texts = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True,
-                                                clean_up_tokenization_spaces=False)
-            texts = [text.replace(" ", "") for text in texts]
-            results.extend(texts)
-
+        pil_images = [self._ensure_pil(image) for image in images]
+        results: List[str] = []
+        for start in range(0, len(pil_images), self.batch_size):
+            batch_images = pil_images[start : start + self.batch_size]
+            results.extend(self._infer_batch(batch_images))
         return results
+
+    def _load_model(self, model_id: str):
+        dtype = self._select_dtype()
+        model_kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": dtype,
+        }
+        if config.PADDLE_OCR_USE_FLASH_ATTN:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+
+        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
+        model.to(self.device)
+        model.eval()
+        return model
+
+    def _select_dtype(self):
+        if self.device.type == "cuda":
+            if torch.cuda.is_bf16_supported():
+                return torch.bfloat16
+            if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major >= 7:
+                return torch.float16
+        return torch.float32
+
+    def _infer_batch(self, images: Sequence[Image.Image]) -> List[str]:
+        chat_texts = [
+            self.processor.apply_chat_template(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": image},
+                            {"type": "text", "text": self.prompt},
+                        ],
+                    }
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for image in images
+        ]
+
+        inputs = self.processor(
+            text=chat_texts,
+            images=list(images),
+            return_tensors="pt",
+            padding=True,
+        )
+        inputs = {
+            key: value.to(self.device) if isinstance(value, torch.Tensor) else value
+            for key, value in inputs.items()
+        }
+        model_inputs = self._filter_supported_inputs(inputs)
+
+        attention_mask = inputs.get("attention_mask")
+        with torch.inference_mode():
+            sequences = self.model.generate(
+                **model_inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            )
+
+        generated_token_ids = []
+        for idx, seq in enumerate(sequences):
+            if attention_mask is not None:
+                input_length = int(attention_mask[idx].sum().item())
+            else:
+                input_length = inputs["input_ids"].shape[1]
+            generated_token_ids.append(seq[input_length:].cpu().tolist())
+
+        decoded_texts = self.processor.batch_decode(
+            generated_token_ids, skip_special_tokens=True
+        )
+        return [self._clean_response(text) for text in decoded_texts]
+
+    def _clean_response(self, text: str) -> str:
+        text = text.strip()
+        if text.startswith(self.prompt):
+            text = text[len(self.prompt) :].strip()
+        return text
+
+    def _filter_supported_inputs(self, inputs):
+        if self._forward_arg_names is None:
+            try:
+                signature = inspect.signature(self.model.forward)
+                self._forward_accepts_kwargs = any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in signature.parameters.values()
+                )
+                self._forward_arg_names = set(signature.parameters.keys())
+            except (TypeError, ValueError):
+                self._forward_arg_names = set()
+                self._forward_accepts_kwargs = True
+
+        if self._forward_accepts_kwargs:
+            return inputs
+
+        if not self._forward_arg_names:
+            return inputs
+
+        filtered = {k: v for k, v in inputs.items() if k in self._forward_arg_names}
+        if not filtered:
+            return inputs
+
+        for key in inputs:
+            if key not in filtered and key not in self._ignored_input_keys:
+                print(f"경고: OCR 모델이 '{key}' 입력을 지원하지 않아 무시합니다.")
+                self._ignored_input_keys.add(key)
+        return filtered
+
+    @staticmethod
+    def _ensure_pil(image) -> Image.Image:
+        if isinstance(image, Image.Image):
+            return image.convert("RGB")
+        return Image.fromarray(image).convert("RGB")

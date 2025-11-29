@@ -4,3 +4,10 @@ numpy
 tqdm
 Pillow
 google-generativeai
+transformers>=4.39.0
+safetensors>=0.4.3
+sentencepiece
+ultralytics
+simple-lama-inpainting-updated
+timm
+einops

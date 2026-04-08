@@ -44,7 +44,6 @@ class PipelineConfig:
     INPAINT_BATCH_SIZE: int = 8
 
     # ── 말풍선 레이아웃 ──
-    BUBBLE_PADDING: int = 0
     BUBBLE_EDGE_SAFE_MARGIN: int = 10
     BUBBLE_PADDING_RATIO: float = 0.15
     BUBBLE_ATTACHMENT_THRESHOLD: int = 5
@@ -61,7 +60,7 @@ class PipelineConfig:
     MIN_ROTATION_ANGLE: int = 2
     FONT_SHRINK_THRESHOLD_RATIO: float = 0.75
 
-    # ── 자유 텍스트 ──
+    # ── 말풍선 밖 텍스트 ──
     FREEFORM_PADDING_RATIO: float = 0.05
     FREEFORM_FONT_COLOR: Tuple[int, int, int] = (0, 0, 0)
     FREEFORM_STROKE_COLOR: Tuple[int, int, int] = (255, 255, 255)
@@ -84,21 +83,15 @@ class PipelineConfig:
     })
 
     # ── 폰트 설정 ──
-    FONT_SCALE_FACTOR: int = 1
-    FONT_LENGTH_ADJUSTMENT: bool = True
     MIN_FONT_SIZE: int = 5
     MAX_FONT_SIZE: int = 80
     DEFAULT_FONT_SIZE: int = 20
-    FONT_UPSCALE_IF_TOO_SMALL: bool = False
     FONT_AREA_FILL_RATIO: float = 0.35
 
     # ── 디버그 ──
     SAVE_DEBUG_CROPS: bool = True
     DRAW_DEBUG_BOXES: bool = False
 
-    # ── OCR 업스케일링 ──
-    OCR_UPSCALE_ENABLED: bool = False
-    OCR_UPSCALE_FACTOR: int = 1
 
     @property
     def DEFAULT_FONT_PATH(self) -> str:

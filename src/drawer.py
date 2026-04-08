@@ -1,4 +1,5 @@
 import functools
+import logging
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -7,6 +8,8 @@ import re
 from src import config
 from src.data_models import PageData, TextElement
 from src.utils import rects_intersect
+
+logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=256)
@@ -41,65 +44,107 @@ def _is_vertical(element, box_width, box_height):
             and (box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD))
 
 
-def _find_best_fit_font(draw, text, initial_font_size, target_width, target_height, font_path):
-    """영역에 맞는 최적의 폰트 크기를 찾고 텍스트를 정렬합니다."""
-    font_size = min(initial_font_size, config.MAX_FONT_SIZE)
+def _aggressive_wrap(text, font, max_width):
+    """모든 공백에서 줄바꿈하되, 여전히 넘치는 줄은 가장 가까운 공백에서 한번 더 쪼갭니다.
+    단어 자체는 절대 쪼개지 않습니다."""
+    raw_lines = text.replace('\n', ' ').split(' ')
+    lines = []
+    current = ""
+    for word in raw_lines:
+        if not word:
+            continue
+        if not current:
+            current = word
+        elif font.getlength(current + " " + word) <= max_width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
+def _find_best_font_size(draw, text, font_path, font_size, target_width, target_height, wrap_fn):
+    """주어진 wrap 함수로 텍스트를 감싸면서 맞는 폰트 크기를 찾습니다."""
     font = ImageFont.load_default()
     wrapped_text = text
-    force_break = False
+    current_size = font_size
 
-    while True:
-        current_font_size = font_size
-        while current_font_size >= config.MIN_FONT_SIZE:
+    while current_size >= config.MIN_FONT_SIZE:
+        try:
+            font = _get_font(font_path, current_size)
+        except IOError:
+            font = ImageFont.load_default()
+            break
+
+        wrapped_text = wrap_fn(text, font, target_width)
+        bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+        if (bbox[2] - bbox[0]) <= target_width and (bbox[3] - bbox[1]) <= target_height:
+            break
+        current_size -= 1
+
+    return font, wrapped_text, current_size
+
+
+def _find_best_fit_font(draw, text, initial_font_size, target_width, target_height, font_path):
+    """영역에 맞는 최적의 폰트 크기를 찾고 텍스트를 정렬합니다.
+
+    전략:
+    1) 일반 줄바꿈으로 시도
+    2) 폰트가 10% 이상 줄어들면 → 공격적 줄바꿈으로 폰트 초기화 후 재시도
+    3) 최종 결과 중 더 큰 폰트를 채택
+    4) 영역 대비 너무 작으면 업스케일
+    """
+    start_size = min(initial_font_size, config.MAX_FONT_SIZE)
+
+    # 1단계: 일반 줄바꿈
+    font, wrapped_text, found_size = _find_best_font_size(
+        draw, text, font_path, start_size, target_width, target_height, _wrap_text
+    )
+    logger.debug(f"[font-fit] text='{text[:20]}...' target=({target_width:.0f}x{target_height:.0f}) "
+                 f"initial={start_size} → normal_wrap={found_size}")
+
+    # 2단계: 10% 이상 줄었으면 공격적 줄바꿈으로 재시도
+    shrink_threshold = 0.9
+    if found_size < start_size * shrink_threshold:
+        agg_font, agg_text, agg_size = _find_best_font_size(
+            draw, text, font_path, start_size, target_width, target_height, _aggressive_wrap
+        )
+        logger.debug(f"[font-fit] aggressive_wrap={agg_size} (normal was {found_size})")
+        # 더 큰 폰트를 채택
+        if agg_size > found_size:
+            font, wrapped_text, found_size = agg_font, agg_text, agg_size
+
+    # 3단계: 영역 대비 텍스트가 작으면 업스케일
+    bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+    text_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    target_area = target_width * target_height
+    if target_area > 0 and (text_area / target_area) < config.FONT_AREA_FILL_RATIO:
+        last_good_font, last_good_text = font, wrapped_text
+        up_size = found_size
+        while up_size < config.MAX_FONT_SIZE:
+            up_size += 1
             try:
-                font = _get_font(font_path, current_font_size)
+                temp_font = _get_font(font_path, up_size)
             except IOError:
-                font = ImageFont.load_default()
                 break
-
-            wrapped_text = _wrap_text(text, font, target_width)
-            text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-            if (text_bbox[2] - text_bbox[0]) <= target_width and (text_bbox[3] - text_bbox[1]) <= target_height:
+            temp_text = _aggressive_wrap(text, temp_font, target_width)
+            temp_bbox = draw.multiline_textbbox((0, 0), temp_text, font=temp_font, align="center")
+            if (temp_bbox[2] - temp_bbox[0]) > target_width or (temp_bbox[3] - temp_bbox[1]) > target_height:
                 break
-            current_font_size -= 1
-
-        if not force_break and (current_font_size / initial_font_size) < config.FONT_SHRINK_THRESHOLD_RATIO:
-            lines = wrapped_text.split('\n')
-            if lines:
-                longest_line_index = max(range(len(lines)), key=lambda i: len(lines[i]))
-                longest_line = lines[longest_line_index]
-                if len(longest_line) > 1:
-                    break_point = len(longest_line) // 2
-                    lines[longest_line_index] = longest_line[:break_point] + "\n" + longest_line[break_point:]
-                    wrapped_text = "\n".join(lines)
-                    force_break = True
-                    font_size = min(initial_font_size, config.MAX_FONT_SIZE)
-                    continue
-        break
-
-    if config.FONT_UPSCALE_IF_TOO_SMALL:
-        text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
-        text_area = (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1])
-        target_area = target_width * target_height
-        if target_area > 0 and (text_area / target_area) < config.FONT_AREA_FILL_RATIO:
-            last_good_font, last_good_wrapped_text = font, wrapped_text
-            while current_font_size < config.MAX_FONT_SIZE:
-                current_font_size += 1
-                try:
-                    temp_font = _get_font(font_path, current_font_size)
-                except IOError:
-                    break
-                temp_wrapped_text = _wrap_text(wrapped_text, temp_font, target_width)
-                temp_bbox = draw.multiline_textbbox((0, 0), temp_wrapped_text, font=temp_font, align="center")
-                if (temp_bbox[2] - temp_bbox[0]) > target_width or (temp_bbox[3] - temp_bbox[1]) > target_height:
-                    break
-                last_good_font, last_good_wrapped_text = temp_font, temp_wrapped_text
-            font, wrapped_text = last_good_font, last_good_wrapped_text
+            last_good_font, last_good_text = temp_font, temp_text
+        font, wrapped_text = last_good_font, last_good_text
+        final_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align="center")
+        final_size = font.size if hasattr(font, 'size') else '?'
+        logger.debug(f"[font-fit] upscaled to {final_size}, "
+                     f"text_bbox=({final_bbox[2]-final_bbox[0]:.0f}x{final_bbox[3]-final_bbox[1]:.0f}), "
+                     f"fill={text_area/target_area:.2f}→{((final_bbox[2]-final_bbox[0])*(final_bbox[3]-final_bbox[1]))/target_area:.2f}")
 
     return font, wrapped_text
 
 
-def _find_best_fit_font_vertical(draw, text, initial_font_size, target_height, font_path):
+def _find_best_fit_font_vertical(draw, text, initial_font_size, target_width, target_height, font_path):
     """세로 쓰기 텍스트에 맞는 최적의 폰트 크기를 찾습니다."""
     font_size = min(initial_font_size, config.MAX_FONT_SIZE)
     font = ImageFont.load_default()
@@ -115,31 +160,33 @@ def _find_best_fit_font_vertical(draw, text, initial_font_size, target_height, f
             font = ImageFont.load_default()
             break
         text_bbox = draw.multiline_textbbox((0, 0), vertical_text, font=font, align="center")
-        if (text_bbox[3] - text_bbox[1]) <= target_height:
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+        if text_h <= target_height and text_w <= target_width:
             break
-        current_font_size -= 2
+        current_font_size -= 1
 
     try:
         font = _get_font(font_path, current_font_size)
     except IOError:
         font = ImageFont.load_default()
 
-    if config.FONT_UPSCALE_IF_TOO_SMALL:
-        text_bbox = draw.multiline_textbbox((0, 0), vertical_text, font=font, align="center")
-        text_height = text_bbox[3] - text_bbox[1]
-        if target_height > 0 and (text_height / target_height) < config.FONT_AREA_FILL_RATIO:
-            last_good_font = font
-            while current_font_size < config.MAX_FONT_SIZE:
-                current_font_size += 1
-                try:
-                    temp_font = _get_font(font_path, current_font_size)
-                except IOError:
-                    break
-                temp_bbox = draw.multiline_textbbox((0, 0), vertical_text, font=temp_font, align="center")
-                if (temp_bbox[3] - temp_bbox[1]) > target_height:
-                    break
-                last_good_font = temp_font
-            font = last_good_font
+    # 영역 대비 텍스트가 작으면 업스케일
+    text_bbox = draw.multiline_textbbox((0, 0), vertical_text, font=font, align="center")
+    text_h = text_bbox[3] - text_bbox[1]
+    if target_height > 0 and (text_h / target_height) < config.FONT_AREA_FILL_RATIO:
+        last_good_font = font
+        while current_font_size < config.MAX_FONT_SIZE:
+            current_font_size += 1
+            try:
+                temp_font = _get_font(font_path, current_font_size)
+            except IOError:
+                break
+            temp_bbox = draw.multiline_textbbox((0, 0), vertical_text, font=temp_font, align="center")
+            if (temp_bbox[3] - temp_bbox[1]) > target_height or (temp_bbox[2] - temp_bbox[0]) > target_width:
+                break
+            last_good_font = temp_font
+        font = last_good_font
 
     return font, vertical_text
 
@@ -153,7 +200,7 @@ def _fit_text(draw, element, target_width, target_height, font_path):
     if vertical:
         font, wrapped_text = _find_best_fit_font_vertical(
             draw, element.translated_text, element.font_size,
-            box_height * (1 + config.VERTICAL_TOLERANCE_RATIO), font_path
+            box_width, box_height * (1 + config.VERTICAL_TOLERANCE_RATIO), font_path
         )
     else:
         font, wrapped_text = _find_best_fit_font(
@@ -182,24 +229,37 @@ def _get_alignment_for_bubble(attachment, text_box, bubble_box):
     return align, anchor, center_x, center_y
 
 
-def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects):
-    """자유 텍스트가 다른 텍스트와 겹치지 않도록 위치를 조정합니다."""
+def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects, img_size=None):
+    """말풍선 밖 텍스트가 다른 텍스트와 겹치지 않도록 위치를 조정합니다."""
     adj_x, adj_y = center_x, center_y
-    for bubble_text_rect in bubble_text_rects:
-        w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
-        current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
-        if rects_intersect(current_bbox, bubble_text_rect):
-            moves = {
-                'up': current_bbox[3] - bubble_text_rect[1],
-                'down': bubble_text_rect[3] - current_bbox[1],
-                'left': current_bbox[2] - bubble_text_rect[0],
-                'right': bubble_text_rect[2] - current_bbox[0]
-            }
-            min_move_dir = min(moves, key=moves.get)
-            if min_move_dir == 'up': adj_y -= moves['up']
-            elif min_move_dir == 'down': adj_y += moves['down']
-            elif min_move_dir == 'left': adj_x -= moves['left']
-            elif min_move_dir == 'right': adj_x += moves['right']
+    w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
+
+    for _ in range(3):  # 최대 3회 재검사
+        moved = False
+        for bubble_text_rect in bubble_text_rects:
+            current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
+            if rects_intersect(current_bbox, bubble_text_rect):
+                moves = {
+                    'up': current_bbox[3] - bubble_text_rect[1],
+                    'down': bubble_text_rect[3] - current_bbox[1],
+                    'left': current_bbox[2] - bubble_text_rect[0],
+                    'right': bubble_text_rect[2] - current_bbox[0]
+                }
+                min_move_dir = min(moves, key=moves.get)
+                if min_move_dir == 'up': adj_y -= moves['up']
+                elif min_move_dir == 'down': adj_y += moves['down']
+                elif min_move_dir == 'left': adj_x -= moves['left']
+                elif min_move_dir == 'right': adj_x += moves['right']
+                moved = True
+        if not moved:
+            break
+
+    # 이미지 경계 클램핑
+    if img_size:
+        img_w, img_h = img_size
+        adj_x = max(w / 2, min(adj_x, img_w - w / 2))
+        adj_y = max(h / 2, min(adj_y, img_h - h / 2))
+
     return adj_x, adj_y
 
 
@@ -249,9 +309,15 @@ def _draw_speech_bubble_texts(draw, img_pil, page_data):
             continue
 
         font_path = config.FONT_MAP.get(element.font_style, config.DEFAULT_FONT_PATH)
-        box_height = element.text_box[3] - element.text_box[1]
-        target_width = (bubble.bubble_box[2] - bubble.bubble_box[0]) * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
-        target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO)
+        bubble_width = bubble.bubble_box[2] - bubble.bubble_box[0]
+        bubble_height = bubble.bubble_box[3] - bubble.bubble_box[1]
+        text_w = element.text_box[2] - element.text_box[0]
+        text_h = element.text_box[3] - element.text_box[1]
+        target_width = bubble_width * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
+        target_height = bubble_height * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
+        logger.debug(f"[bubble] '{element.translated_text[:15]}...' bubble=({bubble_width}x{bubble_height}) "
+                     f"text_box=({text_w:.0f}x{text_h:.0f}) target=({target_width:.0f}x{target_height:.0f}) "
+                     f"pred_font={element.font_size}")
 
         font, wrapped_text, vertical = _fit_text(draw, element, target_width, target_height, font_path)
 
@@ -268,7 +334,7 @@ def _draw_speech_bubble_texts(draw, img_pil, page_data):
 
 
 def _draw_freeform_texts(draw, img_pil, page_data, bubble_text_rects):
-    """자유 텍스트를 그립니다."""
+    """말풍선 밖 텍스트를 그립니다."""
     for element in page_data.freeform_texts:
         if not element.translated_text:
             continue
@@ -296,14 +362,16 @@ def _draw_freeform_texts(draw, img_pil, page_data, bubble_text_rects):
             center_y = (element.text_box[1] + element.text_box[3]) / 2
             text_bbox = draw.multiline_textbbox((center_x, center_y), wrapped_text, font=font, anchor="mm", **bbox_kwargs)
             initial_bbox = (center_x - (text_bbox[2]-text_bbox[0])/2, center_y - (text_bbox[3]-text_bbox[1])/2, center_x + (text_bbox[2]-text_bbox[0])/2, center_y + (text_bbox[3]-text_bbox[1])/2)
-            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+            img_size = (img_pil.width, img_pil.height)
+            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects, img_size)
             draw.text((adj_center_x, adj_center_y), wrapped_text, font=font, anchor="mm", align='center', **draw_kwargs)
         else:
             text_bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, **bbox_kwargs)
             center_x = (element.text_box[0] + element.text_box[2]) / 2
             center_y = element.text_box[1] + (text_bbox[3] - text_bbox[1]) / 2
             initial_bbox = (center_x - (text_bbox[2]-text_bbox[0])/2, center_y - (text_bbox[3]-text_bbox[1])/2, center_x + (text_bbox[2]-text_bbox[0])/2, center_y + (text_bbox[3]-text_bbox[1])/2)
-            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects)
+            img_size = (img_pil.width, img_pil.height)
+            adj_center_x, adj_center_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects, img_size)
             _render_text(draw, img_pil, wrapped_text, font, adj_center_x, adj_center_y, element.angle, draw_kwargs=draw_kwargs)
 
 

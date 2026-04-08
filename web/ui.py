@@ -119,6 +119,15 @@ def _process_images(
         yield gr.update(), gr.update(), gr.update(), f"폴더를 찾을 수 없습니다: {input_folder}"
         return
 
+    # 번역 옵션을 config에 저장
+    config._config.INPUT_DIR = input_folder
+    config._config.YOLO_CONF_THRESHOLD = yolo_threshold
+    config._config.TRANSLATION_BATCH_SIZE = int(batch_size)
+    config._config.DRAW_DEBUG_BOXES = draw_debug
+    if output_folder and output_folder.strip():
+        config._config.OUTPUT_DIR = output_folder.strip()
+    config.save()
+
     output_folder = output_folder.strip() if output_folder and output_folder.strip() else None
     pairs = []         # (원본rgb, 번역rgb, page_name) 쌍 누적
     output_dir = None
@@ -265,7 +274,7 @@ def build_ui() -> gr.Blocks:
                             run_btn = gr.Button("번역 시작", variant="primary", size="lg")
 
                         with gr.Column(scale=1):
-                            translate_status = gr.Textbox(label="로그", interactive=False, lines=12, autoscroll=True)
+                            translate_status = gr.Textbox(label="로그", interactive=False, lines=12, elem_id="log-box")
                             with gr.Row():
                                 json_dl = gr.File(label="번역 데이터 (JSON)", interactive=False)
                                 zip_dl = gr.File(label="결과 이미지 (ZIP)", interactive=False)
@@ -279,6 +288,10 @@ def build_ui() -> gr.Blocks:
                         fn=_process_images,
                         inputs=[input_folder, output_folder, run_yolo, run_batch, run_debug, run_ckpt],
                         outputs=[gallery, json_dl, zip_dl, translate_status],
+                    )
+                    translate_status.change(
+                        fn=None, inputs=None, outputs=None,
+                        js="() => { const el = document.querySelector('#log-box textarea'); if (el) el.scrollTop = el.scrollHeight; }"
                     )
 
                 # ── 설정 탭 ──
@@ -339,9 +352,9 @@ def build_ui() -> gr.Blocks:
                                                info="이보다 크게는 키우지 않음")
                         s_fill = gr.Slider(0.1, 1.0, value=c.FONT_AREA_FILL_RATIO, step=0.05,
                                            label="텍스트 최소 채움 비율",
-                                           info="텍스트가 영역 면적의 이 비율 이하만 차지하면 폰트를 키움 (FONT_UPSCALE_IF_TOO_SMALL 활성 시)")
+                                           info="텍스트가 영역 면적의 이 비율 이하만 차지하면 폰트를 자동으로 키움")
 
-                    with gr.Accordion("자유 텍스트 (말풍선 밖)", open=False):
+                    with gr.Accordion("말풍선 밖 텍스트", open=False):
                         s_stroke_w = gr.Number(value=c.FREEFORM_STROKE_WIDTH, label="외곽선 두께 (px)", precision=0,
                                                info="말풍선 밖 텍스트(효과음, 나레이션 등)의 글자 외곽선 두께")
 
@@ -349,7 +362,7 @@ def build_ui() -> gr.Blocks:
                         s_save_crops = gr.Checkbox(value=c.SAVE_DEBUG_CROPS, label="텍스트 크롭 이미지 저장",
                                                    info="OCR에 넣은 텍스트 잘라낸 이미지를 debug_crops 폴더에 저장")
                         s_draw_debug = gr.Checkbox(value=c.DRAW_DEBUG_BOXES, label="탐지 영역 시각화",
-                                                   info="결과 이미지에 말풍선(빨강), 텍스트(초록), 자유텍스트(파랑) 박스를 표시")
+                                                   info="결과 이미지에 말풍선(빨강), 텍스트(초록), 말풍선 밖 텍스트(파랑) 박스를 표시")
 
                     save_settings_btn = gr.Button("설정 저장", variant="primary")
                     settings_result = gr.Textbox(label="결과", interactive=False)

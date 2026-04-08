@@ -121,22 +121,13 @@ def _prepare_crops(text_items, batch_images_rgb, batch_paths):
         original_crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
         item['crop'] = original_crop_pil
 
-        ocr_crop_pil = original_crop_pil
-        was_upscaled = False
-        if config.OCR_UPSCALE_ENABLED:
-            w, h = ocr_crop_pil.size
-            new_w = int(w * config.OCR_UPSCALE_FACTOR)
-            new_h = int(h * config.OCR_UPSCALE_FACTOR)
-            ocr_crop_pil = ocr_crop_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            was_upscaled = True
-        crops_for_ocr.append(ocr_crop_pil)
+        crops_for_ocr.append(original_crop_pil)
 
         if config.SAVE_DEBUG_CROPS:
             try:
                 page_name = os.path.splitext(os.path.basename(batch_paths[item['page_idx']]))[0]
                 x1, y1, x2, y2 = coords
-                upscaled_str = "_upscaled" if was_upscaled else ""
-                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}{upscaled_str}.png"
+                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}.png"
                 crop_path = os.path.join(config.DEBUG_CROPS_DIR, crop_filename)
                 ocr_crop_pil.save(crop_path)
             except Exception as e:

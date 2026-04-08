@@ -27,7 +27,7 @@ class FontStyle(StrEnum):
 
 @dataclass
 class TextElement:
-    """개별 텍스트 요소(말풍선 안 텍스트, 자유 텍스트 등)의 정보를 담는 데이터 클래스"""
+    """개별 텍스트 요소(말풍선 안 텍스트, 말풍선 밖 텍스트 등)의 정보를 담는 데이터 클래스"""
     text_box: List[int]
     original_text: str
     font_size: int

@@ -18,7 +18,7 @@ class PipelineConfig:
     # ── API ──
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
-    SYSTEM_PROMPT_PATH: str = "prompt.txt"
+    SYSTEM_PROMPT: str = ""
 
     # ── 디렉토리 ──
     INPUT_DIR: str = "data/inputs/"
@@ -149,6 +149,11 @@ def _load_config() -> PipelineConfig:
             data = json.load(f)
         cfg.update_from_dict(data)
     else:
+        # 첫 실행: prompt.txt가 있으면 내용을 SYSTEM_PROMPT로 마이그레이션
+        prompt_path = os.path.join(os.path.dirname(CONFIG_PATH), "prompt.txt")
+        if os.path.exists(prompt_path):
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                cfg.SYSTEM_PROMPT = f.read()
         cfg.save()
     return cfg
 

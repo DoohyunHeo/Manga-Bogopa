@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 
 from src import config, model_loader, extractor, translator, inpainter, drawer
+from src.extractor import detect_objects, merge_text_boxes, extract_text_properties, structure_page_data
 from src.data_models import PageData
 from src.progress import ProgressEvent, PipelinePhase, ProgressCallback, noop_callback
 from src.serialization import save_page_data_json, load_page_data_json
@@ -108,8 +109,34 @@ class MangaTranslationPipeline:
             if not batch_images_rgb:
                 continue
 
-            untranslated_page_data = extractor.process_image_batch(self.models, batch_images_rgb, valid_paths)
-            translated_page_data = translator.translate_pages_in_batch(self.models['translator'], untranslated_page_data)
+            # 1. 탐지
+            num_pages = len(batch_images_rgb)
+            self.callback(ProgressEvent(
+                PipelinePhase.DETECTION, batch_idx, total_batches,
+                f"{num_pages}페이지 말풍선·텍스트 탐지 중..."
+            ))
+            all_text_items, all_bubbles_by_page = detect_objects(self.models['detection'], batch_images_rgb)
+            merged_text_items = merge_text_boxes(all_text_items)
+
+            # 2. OCR + 폰트분석
+            self.callback(ProgressEvent(
+                PipelinePhase.OCR, batch_idx, total_batches,
+                f"{len(merged_text_items)}개 텍스트 OCR + 폰트 분석 중..."
+            ))
+            processed_text_elements = extract_text_properties(self.models, batch_images_rgb, merged_text_items, valid_paths)
+
+            # 3. 데이터 구조화
+            untranslated_page_data = structure_page_data(valid_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements)
+
+            # 4. 번역
+            total_texts = sum(len(p.speech_bubbles) + len(p.freeform_texts) for p in untranslated_page_data)
+            self.callback(ProgressEvent(
+                PipelinePhase.TRANSLATION, batch_idx, total_batches,
+                f"{total_texts}개 대사 Gemini에 전송 중..."
+            ))
+            translated_page_data = translator.translate_pages_in_batch(
+                self.models['translator'], untranslated_page_data, callback=self.callback
+            )
 
             # 이미지 데이터 해제
             for page_data in translated_page_data:

@@ -7,6 +7,10 @@ import numpy as np
 
 class PipelinePhase(StrEnum):
     LOADING_MODELS = "loading_models"
+    DETECTION = "detection"
+    OCR = "ocr"
+    FONT_ANALYSIS = "font_analysis"
+    TRANSLATION = "translation"
     PASS1_BATCH = "pass1_batch"
     SAVING_JSON = "saving_json"
     PASS2_PAGE = "pass2_page"

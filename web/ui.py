@@ -61,7 +61,7 @@ def _save_and_initialize(api_key, gemini_model, input_dir, output_dir):
 # ---------------------------------------------------------------------------
 
 def _save_all_settings(
-    api_key, gemini_model,
+    api_key, gemini_model, system_prompt,
     input_dir, output_dir,
     yolo_thresh, translation_batch, ocr_batch, inpaint_batch,
     bubble_padding_ratio, bubble_edge_margin,
@@ -75,6 +75,7 @@ def _save_all_settings(
     c = config._config
     c.GEMINI_API_KEY = api_key.strip()
     c.GEMINI_MODEL = gemini_model.strip()
+    c.SYSTEM_PROMPT = system_prompt
     c.INPUT_DIR = input_dir.strip()
     c.OUTPUT_DIR = output_dir.strip()
     c.YOLO_CONF_THRESHOLD = yolo_thresh
@@ -106,7 +107,6 @@ def _save_all_settings(
 def _process_images(
     input_folder, output_folder,
     yolo_threshold, batch_size, draw_debug, enable_checkpoint,
-    progress=gr.Progress(track_tqdm=True),
 ):
     if not input_folder or not input_folder.strip():
         gr.Warning("입력 폴더 경로를 입력하세요.")
@@ -136,7 +136,11 @@ def _process_images(
     ):
         phase_labels = {
             PipelinePhase.LOADING_MODELS: "모델 로딩",
-            PipelinePhase.PASS1_BATCH:    "탐지 + OCR + 번역",
+            PipelinePhase.DETECTION:      "탐지",
+            PipelinePhase.OCR:            "OCR + 폰트분석",
+            PipelinePhase.FONT_ANALYSIS:  "폰트분석",
+            PipelinePhase.TRANSLATION:    "번역",
+            PipelinePhase.PASS1_BATCH:    "배치 완료",
             PipelinePhase.SAVING_JSON:    "데이터 저장",
             PipelinePhase.PASS2_PAGE:     "인페인팅 + 식자",
             PipelinePhase.COMPLETE:       "완료",
@@ -147,15 +151,16 @@ def _process_images(
         line = ""
         if event.phase == PipelinePhase.LOADING_MODELS:
             line = f"[{label}] {event.message}"
-            progress(pct, desc=line)
+        elif event.phase in (PipelinePhase.DETECTION, PipelinePhase.OCR,
+                              PipelinePhase.FONT_ANALYSIS, PipelinePhase.TRANSLATION):
+            line = f"[{label}] {event.message}"
         elif event.phase == PipelinePhase.PASS1_BATCH:
             line = f"[{label}] 배치 {event.current}/{event.total} — {event.message}"
-            progress(pct, desc=f"{label} {event.current}/{event.total}")
         elif event.phase == PipelinePhase.SAVING_JSON:
             line = f"[{label}] {event.message}"
         elif event.phase == PipelinePhase.PASS2_PAGE:
-            line = f"[{label}] {event.current}/{event.total} — {event.message}"
-            progress(pct, desc=f"{label} {event.current}/{event.total}")
+            pct = int(event.current / max(event.total, 1) * 100)
+            line = f"[{label}] {event.current}/{event.total} ({pct}%) — {event.message}"
             if event.image_rgb is not None:
                 page_name = event.page_name or f"Page {event.current}"
                 trans_rgb = event.image_rgb.copy()
@@ -260,7 +265,7 @@ def build_ui() -> gr.Blocks:
                             run_btn = gr.Button("번역 시작", variant="primary", size="lg")
 
                         with gr.Column(scale=1):
-                            translate_status = gr.Textbox(label="로그", interactive=False, lines=10, max_lines=30)
+                            translate_status = gr.Textbox(label="로그", interactive=False, lines=12, autoscroll=True)
                             with gr.Row():
                                 json_dl = gr.File(label="번역 데이터 (JSON)", interactive=False)
                                 zip_dl = gr.File(label="결과 이미지 (ZIP)", interactive=False)
@@ -284,6 +289,11 @@ def build_ui() -> gr.Blocks:
                         s_api_key = gr.Textbox(label="Gemini API 키", value=c.GEMINI_API_KEY, type="password")
                         s_gemini_model = gr.Textbox(label="Gemini 모델명", value=c.GEMINI_MODEL,
                                                     info="번역에 사용할 Gemini 모델 (예: gemini-2.5-flash)")
+
+                    with gr.Accordion("번역 프롬프트", open=False):
+                        s_prompt = gr.Textbox(label="시스템 프롬프트", value=c.SYSTEM_PROMPT,
+                                              lines=15, max_lines=40,
+                                              info="Gemini에 보내는 번역 지침. 번역 품질에 직접적으로 영향을 줌")
 
                     with gr.Accordion("경로", open=False):
                         s_input_dir = gr.Textbox(label="기본 입력 폴더", value=c.INPUT_DIR)
@@ -347,7 +357,7 @@ def build_ui() -> gr.Blocks:
                     save_settings_btn.click(
                         fn=_save_all_settings,
                         inputs=[
-                            s_api_key, s_gemini_model,
+                            s_api_key, s_gemini_model, s_prompt,
                             s_input_dir, s_output_dir,
                             s_yolo, s_trans_batch, s_ocr_batch, s_inpaint_batch,
                             s_bubble_pad, s_bubble_edge,

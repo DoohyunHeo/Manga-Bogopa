@@ -23,12 +23,12 @@ def _initialize_gemini():
         )
     genai.configure(api_key=api_key)
 
-    with open(config.SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
-        system_prompt = f.read()
+    if not config.SYSTEM_PROMPT:
+        raise ValueError("시스템 프롬프트가 설정되지 않았습니다. 설정에서 번역 프롬프트를 입력하세요.")
 
     translation_model = genai.GenerativeModel(config.GEMINI_MODEL)
     chat_session = translation_model.start_chat(history=[
-        {'role': 'user', 'parts': [system_prompt]},
+        {'role': 'user', 'parts': [config.SYSTEM_PROMPT]},
         {'role': 'model', 'parts': ["네, 알겠습니다. 이제부터 지시에 따라 번역을 시작하겠습니다."]}
     ])
     logger.info("Gemini 챗 세션 초기화 완료.")

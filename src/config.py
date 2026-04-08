@@ -28,7 +28,6 @@ class PipelineConfig:
     # ── 모델 경로 ──
     MODEL_PATH: str = "data/models/MangaTextExtractor-V1.pt"
     FONT_STYLE_MODEL_PATH: str = "data/models/font_style_analyzer.pth"
-    FONT_SIZE_MODEL_PATH: str = "data/models/font_size_predictor.pth"
 
     # ── 디바이스 (런타임, JSON 제외) ──
     DEVICE: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")

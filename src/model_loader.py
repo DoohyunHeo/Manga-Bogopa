@@ -8,7 +8,7 @@ from simple_lama_inpainting import SimpleLama
 
 from src import config
 from src.batch_manga_ocr import BatchMangaOcr
-from src.models import FontClassifierModel, FontSizeModel
+from src.models import FontClassifierModel
 
 logger = logging.getLogger(__name__)
 
@@ -47,35 +47,25 @@ def _load_vision_models():
         'inpainting': lama_model,
     }
 
-def _load_font_models():
-    """폰트 스타일 및 크기 예측 모델을 로드합니다."""
-    font_classifier_model = None
+def _load_font_model():
+    """폰트 스타일/각도/크기 통합 모델을 로드합니다."""
+    font_model = None
     try:
         checkpoint = torch.load(config.FONT_STYLE_MODEL_PATH, map_location=config.DEVICE)
         style_mapping = checkpoint['style_mapping']
         num_classes = len(style_mapping)
-        font_classifier_model = FontClassifierModel(num_classes, style_mapping)
-        font_classifier_model.load_state_dict(checkpoint['model_state_dict'])
-        font_classifier_model.to(config.DEVICE)
-        font_classifier_model.eval()
-        logger.info("PyTorch FontClassifier(스타일/각도) 모델을 성공적으로 로드했습니다.")
+        backbone = checkpoint.get('backbone', 'convnextv2_tiny.fcmae_ft_in1k')
+        font_model = FontClassifierModel(num_classes, style_mapping, backbone_name=backbone)
+        font_model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        font_model.to(config.DEVICE)
+        font_model.eval()
+
+        has_size = 'head_size.weight' in checkpoint['model_state_dict']
+        logger.info(f"FontClassifier 모델 로드 완료. backbone={backbone}, size_head={'O' if has_size else 'X'}")
     except Exception as e:
         logger.warning(f"FontClassifier 모델 로드 실패. -> {e}")
 
-    font_size_model = None
-    try:
-        font_size_model = FontSizeModel()
-        font_size_model.load_state_dict(torch.load(config.FONT_SIZE_MODEL_PATH, map_location=config.DEVICE))
-        font_size_model.to(config.DEVICE)
-        font_size_model.eval()
-        logger.info("PyTorch FontSize 모델을 성공적으로 로드했습니다.")
-    except Exception as e:
-        logger.warning(f"PyTorch FontSize 모델 로드 실패. -> {e}")
-
-    return {
-        'font_classifier': font_classifier_model,
-        'font_size': font_size_model,
-    }
+    return {'font_classifier': font_model}
 
 def load_all_models():
     """모든 AI 모델과 구글 Gemini 챗 세션을 초기화하고 로드합니다."""
@@ -83,7 +73,7 @@ def load_all_models():
 
     translator_session = _initialize_gemini()
     vision_models = _load_vision_models()
-    font_models = _load_font_models()
+    font_models = _load_font_model()
 
     logger.info("모든 모델 초기화 완료.")
 

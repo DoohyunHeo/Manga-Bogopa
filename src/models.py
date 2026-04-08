@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
 import timm
 
 
@@ -17,6 +16,7 @@ class FontClassifierModel(nn.Module):
         )
         self.head_style = nn.Linear(512, num_classes)
         self.head_angle_vec = nn.Linear(512, 2)
+        self.head_size = nn.Linear(512, 1)
         self.style_mapping = style_mapping
 
     def forward(self, x):
@@ -24,28 +24,14 @@ class FontClassifierModel(nn.Module):
         x = self.pool(feats)
         x = torch.flatten(x, 1)
         x = self.neck(x)
+
         style_logits = self.head_style(x)
+
         angle_vec = self.head_angle_vec(x)
         angle_vec = torch.nn.functional.normalize(angle_vec, dim=-1)
-
-        # Convert angle vector back to degrees to match the expected output format
         s, c = angle_vec[..., 0], angle_vec[..., 1]
         angle_deg = torch.atan2(s, c) * 180.0 / 3.141592653589793
 
-        return {"angle": angle_deg, "style": style_logits}
+        size_pred = self.head_size(x).squeeze(-1)
 
-
-class FontSizeModel(nn.Module):
-    def __init__(self):
-        super(FontSizeModel, self).__init__()
-        self.backbone = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT).features
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Sequential(nn.Dropout(0.5), nn.Linear(1280, 512), nn.ReLU())
-        self.size_head = nn.Linear(512, 1)
-
-    def forward(self, x):
-        x = self.backbone(x)
-        x = self.pool(x)
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
-        return self.size_head(x).squeeze(-1)
+        return {"angle": angle_deg, "style": style_logits, "size": size_pred}

@@ -136,10 +136,10 @@ def _prepare_crops(text_items, batch_images_rgb, batch_paths):
     return crops_for_ocr
 
 
-def _predict_font_properties(font_classifier_model, font_size_model, text_items):
-    """폰트 스타일, 크기, 각도를 예측합니다."""
-    if not (font_classifier_model and font_size_model):
-        return [{'font_size': 20, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
+def _predict_font_properties(font_classifier_model, text_items):
+    """폰트 스타일, 각도, 크기를 통합 모델로 예측합니다."""
+    if not font_classifier_model:
+        return [{'font_size': config.DEFAULT_FONT_SIZE, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
 
     logger.info(f"{len(text_items)}개의 텍스트 조각을 폰트 모델로 분석 중...")
     transform = transforms.Compose([
@@ -155,11 +155,14 @@ def _predict_font_properties(font_classifier_model, font_size_model, text_items)
         image_tensors = torch.stack([transform(item['crop'].convert("RGB")) for item in batch_items]).to(config.DEVICE)
 
         with torch.no_grad():
-            outputs_classifier = font_classifier_model(image_tensors)
-            pred_sizes = font_size_model(image_tensors)
-            pred_angles = outputs_classifier['angle'].cpu().numpy()
-            pred_style_indices = torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy()
-            pred_sizes_np = pred_sizes.cpu().numpy()
+            outputs = font_classifier_model(image_tensors)
+            pred_angles = outputs['angle'].cpu().numpy()
+            pred_style_indices = torch.argmax(outputs['style'], dim=1).cpu().numpy()
+            # 통합 모델이면 size 출력 있음, 구 모델이면 없음
+            if 'size' in outputs:
+                pred_sizes = outputs['size'].cpu().numpy()
+            else:
+                pred_sizes = [config.DEFAULT_FONT_SIZE] * len(batch_items)
 
         for j in range(len(batch_items)):
             if 0 in font_classifier_model.style_mapping:
@@ -169,7 +172,7 @@ def _predict_font_properties(font_classifier_model, font_size_model, text_items)
 
             style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
             all_props.append({
-                'font_size': int(round(pred_sizes_np[j])),
+                'font_size': int(round(pred_sizes[j])),
                 'angle': int(pred_angles[j]),
                 'font_style': style_name
             })
@@ -190,7 +193,7 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
     all_ocr_results = models['ocr'](crops_for_ocr)
 
     # 3. 폰트 속성 예측
-    all_props = _predict_font_properties(models['font_classifier'], models['font_size'], text_items)
+    all_props = _predict_font_properties(models['font_classifier'], text_items)
 
     # 4. TextElement 객체 생성
     processed_text_elements = []

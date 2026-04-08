@@ -15,19 +15,14 @@ logger = logging.getLogger(__name__)
 
 def _initialize_gemini():
     """Gemini API 및 챗 세션을 초기화합니다."""
-    api_key = os.environ.get('GEMINI_API_KEY', '').strip()
+    api_key = config.get_api_key()
     if not api_key:
-        try:
-            with open(config.API_KEY_FILE, 'r') as f:
-                api_key = f.read().strip()
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"GEMINI_API_KEY 환경변수가 설정되지 않았고, '{config.API_KEY_FILE}' 파일도 찾을 수 없습니다."
-            )
-    if not api_key:
-        raise ValueError("API 키가 비어있습니다. GEMINI_API_KEY 환경변수 또는 api_key.txt를 확인하세요.")
+        raise ValueError(
+            "Gemini API 키가 설정되지 않았습니다. "
+            "웹 UI에서 설정하거나 GEMINI_API_KEY 환경변수를 설정하세요."
+        )
     genai.configure(api_key=api_key)
-    
+
     with open(config.SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
         system_prompt = f.read()
 
@@ -76,7 +71,7 @@ def _load_font_models():
         logger.info("PyTorch FontSize 모델을 성공적으로 로드했습니다.")
     except Exception as e:
         logger.warning(f"PyTorch FontSize 모델 로드 실패. -> {e}")
-    
+
     return {
         'font_classifier': font_classifier_model,
         'font_size': font_size_model,

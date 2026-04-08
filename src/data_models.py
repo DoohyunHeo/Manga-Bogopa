@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import List, Optional
+
 import numpy as np
 
 
@@ -34,6 +35,17 @@ class TextElement:
     angle: int
     translated_text: Optional[str] = None
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "TextElement":
+        return cls(
+            text_box=d["text_box"],
+            original_text=d["original_text"],
+            font_size=d["font_size"],
+            font_style=d["font_style"],
+            angle=d["angle"],
+            translated_text=d.get("translated_text"),
+        )
+
 
 @dataclass
 class SpeechBubble:
@@ -42,11 +54,28 @@ class SpeechBubble:
     text_element: TextElement
     attachment: Attachment
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "SpeechBubble":
+        return cls(
+            bubble_box=d["bubble_box"],
+            text_element=TextElement.from_dict(d["text_element"]),
+            attachment=Attachment(d["attachment"]),
+        )
+
 
 @dataclass
 class PageData:
     """페이지 한 장의 모든 정보를 담는 데이터 클래스"""
     source_page: str
-    image_rgb: np.ndarray
+    image_rgb: Optional[np.ndarray] = None
     speech_bubbles: List[SpeechBubble] = field(default_factory=list)
     freeform_texts: List[TextElement] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PageData":
+        return cls(
+            source_page=d["source_page"],
+            image_rgb=None,
+            speech_bubbles=[SpeechBubble.from_dict(sb) for sb in d.get("speech_bubbles", [])],
+            freeform_texts=[TextElement.from_dict(ft) for ft in d.get("freeform_texts", [])],
+        )

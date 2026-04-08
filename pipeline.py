@@ -1,24 +1,32 @@
 import logging
 import os
 import glob
-import json
-from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
 import torch
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
+
 from src import config, model_loader, extractor, translator, inpainter, drawer
-from src.data_models import PageData, TextElement, SpeechBubble
+from src.data_models import PageData
+from src.progress import ProgressEvent, PipelinePhase, ProgressCallback, noop_callback
+from src.serialization import save_page_data_json, load_page_data_json
+from src.checkpoint import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
 
 class MangaTranslationPipeline:
-    def __init__(self):
+    def __init__(self, progress_callback: ProgressCallback = None, enable_checkpoint: bool = True):
         """파이프라인을 초기화하고 모든 모델을 로드합니다."""
-        self.models = model_loader.load_all_models()
+        self.callback = progress_callback or noop_callback
+        self.enable_checkpoint = enable_checkpoint
         self.output_dir = "data/outputs"
+
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 0, 1, "모델 로딩 중..."))
+        self.models = model_loader.load_all_models()
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 1, 1, "모델 로딩 완료"))
 
     def run(self):
         """전체 만화 번역 및 식자 프로세스를 실행합니다."""
@@ -32,28 +40,60 @@ class MangaTranslationPipeline:
             logger.info(f"'{config.INPUT_DIR}' 폴더에 이미지가 없습니다.")
             return
 
-        # Pass 1: 탐지 + OCR + 번역 (텍스트 데이터 수집)
-        all_page_data = self._extract_and_translate_data(image_paths)
+        # 체크포인트 관리자 초기화
+        ckpt = None
+        if self.enable_checkpoint:
+            ckpt = CheckpointManager(self.output_dir, config.INPUT_DIR)
+            ckpt.load_or_create(len(image_paths))
+
+        # --- Pass 1: 탐지 + OCR + 번역 ---
+        if ckpt and ckpt.is_pass1_complete():
+            logger.info("체크포인트에서 Pass 1 데이터를 로드합니다...")
+            all_page_data = ckpt.load_pass1_data()
+        else:
+            remaining_paths = ckpt.get_pass1_remaining_paths(image_paths) if ckpt else image_paths
+            if not remaining_paths:
+                logger.info("Pass 1에서 처리할 이미지가 없습니다.")
+                all_page_data = ckpt.load_pass1_data() if ckpt else []
+            else:
+                new_page_data = self._extract_and_translate_data(remaining_paths, ckpt)
+                if ckpt:
+                    ckpt.mark_pass1_complete()
+                    all_page_data = ckpt.load_pass1_data()
+                else:
+                    all_page_data = new_page_data
+
+            # 체크포인트 없을 때만 별도 JSON 저장 (체크포인트는 배치마다 증분 저장)
+            if not ckpt and all_page_data:
+                json_path = os.path.join(self.output_dir, "translation_data.json")
+                save_page_data_json(all_page_data, json_path)
+                self.callback(ProgressEvent(PipelinePhase.SAVING_JSON, 1, 1, "JSON 저장 완료"))
+                logger.info(f"번역 데이터를 '{json_path}' 파일로 저장했습니다.")
 
         if not all_page_data:
             logger.info("처리할 데이터가 없어 파이프라인을 종료합니다.")
             return
 
-        self._save_data_to_json(all_page_data)
+        # --- Pass 2: 인페인팅 + 렌더링 ---
+        pages_to_process = ckpt.get_pass2_remaining_pages(all_page_data) if ckpt else all_page_data
+        if pages_to_process:
+            self._inpaint_and_draw_streaming(pages_to_process, image_paths, ckpt)
 
-        # Pass 2: 이미지 재로드 → 인페인팅 → 렌더링 → 저장 (페이지별 스트리밍)
-        self._inpaint_and_draw_streaming(all_page_data, image_paths)
+        if ckpt:
+            ckpt.mark_complete()
 
+        self.callback(ProgressEvent(PipelinePhase.COMPLETE, 1, 1, "모든 프로세스 완료"))
         logger.info("모든 프로세스 완료.")
 
-    def _extract_and_translate_data(self, image_paths):
+    def _extract_and_translate_data(self, image_paths, ckpt=None):
         """이미지에서 데이터를 추출하고 번역합니다."""
         all_page_data = []
         batch_size = config.TRANSLATION_BATCH_SIZE
         total_batches = (len(image_paths) + batch_size - 1) // batch_size
 
         for i in range(0, len(image_paths), batch_size):
-            logger.info(f"--- Processing Batch {i // batch_size + 1}/{total_batches} ---")
+            batch_idx = i // batch_size + 1
+            logger.info(f"--- Processing Batch {batch_idx}/{total_batches} ---")
             batch_paths = image_paths[i:i + batch_size]
 
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -71,47 +111,37 @@ class MangaTranslationPipeline:
             untranslated_page_data = extractor.process_image_batch(self.models, batch_images_rgb, valid_paths)
             translated_page_data = translator.translate_pages_in_batch(self.models['translator'], untranslated_page_data)
 
-            # Pass 1 완료 후 이미지 데이터 해제 — 텍스트 메타데이터만 유지
+            # 이미지 데이터 해제
             for page_data in translated_page_data:
                 page_data.image_rgb = None
+
+            # 체크포인트: 배치별 증분 저장
+            if ckpt:
+                ckpt.mark_pass1_batch_complete(translated_page_data)
             all_page_data.extend(translated_page_data)
+
+            self.callback(ProgressEvent(
+                PipelinePhase.PASS1_BATCH, batch_idx, total_batches,
+                f"배치 {batch_idx}/{total_batches} 완료 ({len(valid_paths)}페이지)"
+            ))
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         return all_page_data
 
-    def _save_data_to_json(self, all_page_data):
-        """추출된 데이터를 JSON 파일로 저장합니다."""
-        class DataclassEncoder(json.JSONEncoder):
-            def default(self, o):
-                if isinstance(o, PageData):
-                    d = o.__dict__.copy()
-                    d.pop('image_rgb', None)
-                    return d
-                if isinstance(o, (SpeechBubble, TextElement)):
-                    return o.__dict__
-                if isinstance(o, np.ndarray):
-                    return o.tolist()
-                return super().default(o)
-
-        with open('translation_data.json', 'w', encoding='utf-8') as f:
-            json.dump(all_page_data, f, ensure_ascii=False, indent=4, cls=DataclassEncoder)
-        logger.info("모든 페이지의 최종 데이터 구조를 'translation_data.json' 파일로 저장했습니다.")
-
-    def _inpaint_and_draw_streaming(self, all_page_data, image_paths):
+    def _inpaint_and_draw_streaming(self, pages_to_process, image_paths, ckpt=None):
         """페이지별로 이미지를 재로드하여 인페인팅 + 렌더링 + 저장을 스트리밍합니다."""
-        # source_page 이름으로 원본 경로를 매핑
         path_map = {os.path.basename(p): p for p in image_paths}
+        total_pages = len(pages_to_process)
 
-        logger.info("스트리밍 모드로 Inpainting + 식자 작업을 시작합니다...")
-        for page_data in tqdm(all_page_data, desc="Inpaint & Draw"):
+        logger.info(f"스트리밍 모드로 {total_pages}페이지 Inpainting + 식자 작업을 시작합니다...")
+        for idx, page_data in enumerate(tqdm(pages_to_process, desc="Inpaint & Draw")):
             original_path = path_map.get(page_data.source_page)
             if not original_path:
                 logger.warning(f"'{page_data.source_page}'의 원본 경로를 찾을 수 없습니다.")
                 continue
 
-            # 이미지 재로드
             image_bgr = cv2.imread(original_path)
             if image_bgr is None:
                 logger.warning(f"'{original_path}' 로딩 실패")
@@ -119,19 +149,26 @@ class MangaTranslationPipeline:
             image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             page_data.image_rgb = image_rgb
 
-            # 인페인팅
             inpainted_images = inpainter.inpaint_pages_in_batch(self.models, [page_data])
-
-            # 텍스트 렌더링
             final_image_rgb = drawer.draw_text_on_image(inpainted_images[0], page_data)
 
             if config.DRAW_DEBUG_BOXES:
                 self._draw_debug_boxes(final_image_rgb, page_data)
 
-            # 저장
             output_path = os.path.join(self.output_dir, page_data.source_page)
             final_image_bgr = cv2.cvtColor(final_image_rgb, cv2.COLOR_RGB2BGR)
             cv2.imwrite(output_path, final_image_bgr)
+
+            # 진행 콜백 (완성된 이미지 포함)
+            self.callback(ProgressEvent(
+                PipelinePhase.PASS2_PAGE, idx + 1, total_pages,
+                f"{page_data.source_page} 완료",
+                page_name=page_data.source_page,
+                image_rgb=final_image_rgb
+            ))
+
+            if ckpt:
+                ckpt.mark_pass2_page_complete(page_data.source_page)
 
             # 메모리 해제
             page_data.image_rgb = None

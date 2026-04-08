@@ -1,8 +1,11 @@
+import logging
 import torch
 from manga_ocr import MangaOcr
 from transformers import AutoTokenizer
 import sys
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 class BatchMangaOcr(MangaOcr):
@@ -17,20 +20,20 @@ class BatchMangaOcr(MangaOcr):
 
         # 1. FP16 (혼합 정밀도) 적용 (CUDA 사용 시)
         if self.device.type == 'cuda':
-            print("BatchMangaOcr: FP16 (혼합 정밀도) 추론을 활성화합니다.")
+            logger.info("BatchMangaOcr: FP16 (혼합 정밀도) 추론을 활성화합니다.")
             self.model = self.model.half()
 
         # 2. torch.compile() 적용 (PyTorch 2.0+ 권장)
         # torch 버전 확인
         torch_version = torch.__version__
         if sys.platform != 'darwin' and int(torch_version.split('.')[0]) >= 2:
-            print(f"BatchMangaOcr: torch.compile()을 적용합니다. (PyTorch 버전: {torch_version})")
+            logger.info(f"BatchMangaOcr: torch.compile()을 적용합니다. (PyTorch 버전: {torch_version})")
             # mode="reduce-overhead"는 작은 배치 크기에서 오버헤드를 줄여줌
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
         # __init__에서 한 번만 로드
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        print(f"BatchMangaOcr 초기화 완료. (Device: {self.device}, Batch Size: {self.batch_size})")
+        logger.info(f"BatchMangaOcr 초기화 완료. (Device: {self.device}, Batch Size: {self.batch_size})")
 
     def __call__(self, image_list):
         if isinstance(image_list, list):

@@ -1,0 +1,23 @@
+# IDE
+.idea/
+/shelf/
+/workspace.xml
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+
+# Project secrets & data
+api_key.txt
+prompt.txt
+translation_data.json
+/data
+/ModelTrain
+
+# OS
+.DS_Store
+Thumbs.db

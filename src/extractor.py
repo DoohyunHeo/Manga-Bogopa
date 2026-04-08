@@ -1,5 +1,6 @@
+import logging
 import os
-from collections import defaultdict
+from collections import defaultdict, deque
 import cv2
 import numpy as np
 import torch
@@ -7,9 +8,11 @@ import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 
+logger = logging.getLogger(__name__)
+
 from src import config
 from src.utils import Letterbox, calculate_iou, merge_boxes, is_box_inside
-from src.data_models import PageData, TextElement, SpeechBubble
+from src.data_models import Attachment, PageData, TextElement, SpeechBubble
 
 
 def check_bubble_attachment(cropped_bubble_image_rgb):
@@ -18,7 +21,7 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
         img = cropped_bubble_image_rgb
         img_h, img_w = img.shape[:2]
         scan_width = int(img_w * 0.10)
-        if scan_width == 0: return 'none'
+        if scan_width == 0: return Attachment.NONE
 
         left_crop = img[:, :scan_width]
         right_crop = img[:, -scan_width:]
@@ -34,16 +37,17 @@ def check_bubble_attachment(cropped_bubble_image_rgb):
         lines_right = cv2.HoughLinesP(edges_right, 1, np.pi / 180, threshold=10, minLineLength=img_h * 0.8, maxLineGap=10)
         has_right_vertical_line = any(abs(l[0] - l[2]) < threshold and l[0] > scan_width - threshold for l in lines_right[0]) if lines_right is not None else False
 
-        if has_right_vertical_line and not has_left_vertical_line: return 'right'
-        if has_left_vertical_line and not has_right_vertical_line: return 'left'
-        return 'none'
-    except Exception:
-        return 'none'
+        if has_right_vertical_line and not has_left_vertical_line: return Attachment.RIGHT
+        if has_left_vertical_line and not has_right_vertical_line: return Attachment.LEFT
+        return Attachment.NONE
+    except Exception as e:
+        logger.warning(f"말풍선 방향 감지 실패: {e}")
+        return Attachment.NONE
 
 
 def detect_objects(detection_model, batch_images_rgb):
     """YOLO 모델을 사용하여 이미지 내의 모든 객체를 탐지합니다."""
-    tqdm.write(f"-> {len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
+    logger.info(f"{len(batch_images_rgb)}개 페이지 일괄 탐지 중...")
     # 모델에 저장된 imgsz를 사용하고, 없을 경우 기본값으로 (800, 560)을 사용합니다.
     batch_results = detection_model(batch_images_rgb, conf=config.YOLO_CONF_THRESHOLD, verbose=False)
 
@@ -64,7 +68,7 @@ def detect_objects(detection_model, batch_images_rgb):
 
 def merge_text_boxes(text_items):
     """탐지된 텍스트 박스 중 겹치는 것들을 병합합니다."""
-    tqdm.write(f"-> {len(text_items)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
+    logger.info(f"{len(text_items)}개의 탐지된 객체에 대해 중복 박스 병합 처리 중...")
     grouped_items = defaultdict(list)
     for item in text_items:
         grouped_items[(item['page_idx'], item['class_name'])].append(item)
@@ -87,10 +91,10 @@ def merge_text_boxes(text_items):
         for i in range(num_items):
             if not visited[i]:
                 component = []
-                q = [i]
+                q = deque([i])
                 visited[i] = True
                 while q:
-                    u = q.pop(0)
+                    u = q.popleft()
                     component.append(u)
                     for v in range(num_items):
                         if adj_matrix[u, v] and not visited[v]:
@@ -104,20 +108,12 @@ def merge_text_boxes(text_items):
                 else:
                     final_items.append(items[component[0]])
     
-    tqdm.write(f"-> 병합 후 {len(final_items)}개의 객체로 정리되었습니다.")
+    logger.info(f"병합 후 {len(final_items)}개의 객체로 정리되었습니다.")
     return final_items
 
 
-def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
-    """텍스트 박스에 대해 OCR과 폰트 분석을 수행하고 TextElement 리스트를 반환합니다."""
-    if not text_items:
-        return []
-
-    ocr_model = models['ocr']
-    font_classifier_model = models['font_classifier']
-    font_size_model = models['font_size']
-
-    # OCR 및 폰트 분석을 위한 크롭 이미지 준비
+def _prepare_crops(text_items, batch_images_rgb, batch_paths):
+    """텍스트 아이템에서 크롭 이미지를 준비하고 OCR용 이미지 리스트를 반환합니다."""
     crops_for_ocr = []
     for item in text_items:
         image_rgb = batch_images_rgb[item['page_idx']]
@@ -144,50 +140,68 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
                 crop_path = os.path.join(config.DEBUG_CROPS_DIR, crop_filename)
                 ocr_crop_pil.save(crop_path)
             except Exception as e:
-                tqdm.write(f"경고: 디버그 크롭 저장 실패 {crop_path}: {e}")
+                logger.warning(f"디버그 크롭 저장 실패: {e}")
 
-    # OCR 실행
-    tqdm.write(f"-> {len(crops_for_ocr)}개의 텍스트 조각을 Batch OCR 처리 중...")
-    all_ocr_results = ocr_model(crops_for_ocr)
+    return crops_for_ocr
 
-    # 폰트 속성 예측
+
+def _predict_font_properties(font_classifier_model, font_size_model, text_items):
+    """폰트 스타일, 크기, 각도를 예측합니다."""
+    if not (font_classifier_model and font_size_model):
+        return [{'font_size': 20, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
+
+    logger.info(f"{len(text_items)}개의 텍스트 조각을 폰트 모델로 분석 중...")
+    transform = transforms.Compose([
+        Letterbox(config.IMAGE_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
     all_props = []
-    if font_classifier_model and font_size_model:
-        tqdm.write(f"-> {len(text_items)}개의 텍스트 조각을 폰트 모델로 분석 중...")
-        transform = transforms.Compose([
-            Letterbox(config.IMAGE_SIZE),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        
-        font_batch_size = config.FONT_MODEL_BATCH_SIZE
-        for i in tqdm(range(0, len(text_items), font_batch_size), desc="Font Model"):
-            batch_items = text_items[i:i+font_batch_size]
-            image_tensors = torch.stack([transform(item['crop'].convert("RGB")) for item in batch_items]).to(config.DEVICE)
-            
-            with torch.no_grad():
-                outputs_classifier = font_classifier_model(image_tensors)
-                pred_sizes = font_size_model(image_tensors)
-                pred_angles = outputs_classifier['angle'].cpu().numpy()
-                pred_style_indices = torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy()
-                pred_sizes_np = pred_sizes.cpu().numpy()
+    font_batch_size = config.FONT_MODEL_BATCH_SIZE
+    for i in tqdm(range(0, len(text_items), font_batch_size), desc="Font Model"):
+        batch_items = text_items[i:i+font_batch_size]
+        image_tensors = torch.stack([transform(item['crop'].convert("RGB")) for item in batch_items]).to(config.DEVICE)
 
-            for j in range(len(batch_items)):
-                if 0 in font_classifier_model.style_mapping:
-                    style_idx = int(pred_style_indices[j])
-                else:
-                    style_idx = str(pred_style_indices[j])
+        with torch.no_grad():
+            outputs_classifier = font_classifier_model(image_tensors)
+            pred_sizes = font_size_model(image_tensors)
+            pred_angles = outputs_classifier['angle'].cpu().numpy()
+            pred_style_indices = torch.argmax(outputs_classifier['style'], dim=1).cpu().numpy()
+            pred_sizes_np = pred_sizes.cpu().numpy()
 
-                style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
-                all_props.append({
-                    'font_size': int(round(pred_sizes_np[j])),
-                    'angle': int(pred_angles[j]),
-                    'font_style': style_name
-                })
-    else:
-        all_props = [{'font_size': 20, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
+        for j in range(len(batch_items)):
+            if 0 in font_classifier_model.style_mapping:
+                style_idx = int(pred_style_indices[j])
+            else:
+                style_idx = str(pred_style_indices[j])
 
-    # TextElement 객체 생성
+            style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
+            all_props.append({
+                'font_size': int(round(pred_sizes_np[j])),
+                'angle': int(pred_angles[j]),
+                'font_style': style_name
+            })
+
+    return all_props
+
+
+def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
+    """텍스트 박스에 대해 OCR과 폰트 분석을 수행하고 TextElement 리스트를 반환합니다."""
+    if not text_items:
+        return []
+
+    # 1. 크롭 이미지 준비
+    crops_for_ocr = _prepare_crops(text_items, batch_images_rgb, batch_paths)
+
+    # 2. OCR 실행
+    logger.info(f"{len(crops_for_ocr)}개의 텍스트 조각을 Batch OCR 처리 중...")
+    all_ocr_results = models['ocr'](crops_for_ocr)
+
+    # 3. 폰트 속성 예측
+    all_props = _predict_font_properties(models['font_classifier'], models['font_size'], text_items)
+
+    # 4. TextElement 객체 생성
     processed_text_elements = []
     for i, item in enumerate(text_items):
         if all_ocr_results[i]:
@@ -197,7 +211,7 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
                 **all_props[i]
             )
             processed_text_elements.append({'element': element, 'page_idx': item['page_idx'], 'class_name': item['class_name']})
-    
+
     return processed_text_elements
 
 

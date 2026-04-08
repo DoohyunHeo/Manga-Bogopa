@@ -1,6 +1,27 @@
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import List, Optional
 import numpy as np
+
+
+class Attachment(StrEnum):
+    """말풍선 말꼬리 방향"""
+    LEFT = 'left'
+    RIGHT = 'right'
+    NONE = 'none'
+
+
+class FontStyle(StrEnum):
+    """폰트 스타일 분류"""
+    POP = 'pop'
+    ANGRY = 'angry'
+    CUTE = 'cute'
+    EMBARRASSMENT = 'embarrassment'
+    HANDWRITING = 'handwriting'
+    NARRATION = 'narration'
+    SCARED = 'scared'
+    SHOUTING = 'shouting'
+    STANDARD = 'standard'
 
 
 @dataclass
@@ -19,7 +40,7 @@ class SpeechBubble:
     """말풍선과 그 안의 텍스트 요소 정보를 담는 데이터 클래스"""
     bubble_box: List[int]
     text_element: TextElement
-    attachment: str
+    attachment: Attachment
 
 
 @dataclass

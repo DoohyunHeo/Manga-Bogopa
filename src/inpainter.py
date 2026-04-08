@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import cv2
 import torch
@@ -5,6 +6,8 @@ from PIL import Image
 from torchvision.transforms.functional import to_tensor, to_pil_image
 from tqdm import tqdm
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 from src import config
 from src.data_models import PageData
@@ -21,7 +24,7 @@ def inpaint_pages_in_batch(models, all_page_data: List[PageData]) -> List[np.nda
     # 원본 이미지를 복사하여 최종 결과물로 사용할 리스트를 초기화합니다.
     inpainted_pages = [p.image_rgb.copy() for p in all_page_data]
 
-    tqdm.write("모든 페이지에서 Inpaint할 영역을 수집 중...")
+    logger.info("모든 페이지에서 Inpaint할 영역을 수집 중...")
     for page_idx, page_data in enumerate(all_page_data):
         all_coords_to_erase = []
         for bubble in page_data.speech_bubbles:
@@ -53,13 +56,13 @@ def inpaint_pages_in_batch(models, all_page_data: List[PageData]) -> List[np.nda
             })
 
     if not all_patches_to_inpaint:
-        tqdm.write("Inpaint할 텍스트가 없습니다.")
+        logger.info("Inpaint할 텍스트가 없습니다.")
         return inpainted_pages
 
     # 모든 페이지의 모든 패치를 한 번에 처리
     inpainted_patches = erase_patches_in_batch(lama_model, all_patches_to_inpaint)
 
-    tqdm.write("Inpaint된 패치를 원본 페이지에 다시 적용 중...")
+    logger.info("Inpaint된 패치를 원본 페이지에 다시 적용 중...")
     for i, patch_meta in enumerate(tqdm(all_patches_metadata, desc="Applying Patches")):
         page_idx = patch_meta['page_idx']
         ctx_x1, ctx_y1, ctx_x2, ctx_y2 = patch_meta['coords']
@@ -79,10 +82,10 @@ def erase_patches_in_batch(lama_model, patch_mask_list, target_size=512):
     if not patch_mask_list:
         return []
 
-    tqdm.write(f"총 {len(patch_mask_list)}개의 텍스트 조각을 미니 배치로 나누어 Inpainting 시작...")
+    logger.info(f"총 {len(patch_mask_list)}개의 텍스트 조각을 미니 배치로 나누어 Inpainting 시작...")
 
     all_output_patches = []
-    batch_size = 8  # 하드웨어에 맞게 조절
+    batch_size = config.INPAINT_BATCH_SIZE
 
     for i in tqdm(range(0, len(patch_mask_list), batch_size), desc="Inpainting Batches"):
         mini_batch = patch_mask_list[i:i + batch_size]
@@ -117,7 +120,7 @@ def erase_patches_in_batch(lama_model, patch_mask_list, target_size=512):
 
         all_output_patches.extend(output_patches_mini_batch)
 
-    tqdm.write("배치 Inpainting 완료.")
+    logger.info("배치 Inpainting 완료.")
     return all_output_patches
 
 
@@ -137,30 +140,3 @@ def create_mask_from_coords(image, list_of_coords, padding=0):
 
         cv2.rectangle(mask, (padded_x1, padded_y1), (padded_x2, padded_y2), 255, -1)
     return mask
-
-
-def inpaint_image_with_lama(lama_model, image_rgb, mask):
-    """
-    LaMa 모델을 사용하여 단일 이미지의 마스크된 영역을 Inpaint합니다.
-    """
-    # 이미지와 마스크를 PIL 이미지로 변환
-    image_pil = Image.fromarray(image_rgb)
-    mask_pil = Image.fromarray(mask).convert("L")
-
-    # 모델 입력에 맞게 리사이즈
-    resized_image = image_pil.resize((512, 512), Image.Resampling.LANCZOS)
-    resized_mask = mask_pil.resize((512, 512), Image.Resampling.NEAREST)
-
-    # 텐서로 변환
-    img_tensor = to_tensor(resized_image).unsqueeze(0).to(lama_model.device)
-    mask_tensor = to_tensor(resized_mask).unsqueeze(0).to(lama_model.device)
-
-    # Inpainting 실행
-    with torch.no_grad():
-        inpainted_tensor = lama_model.model(img_tensor, mask_tensor)
-
-    # 결과 이미지를 다시 원본 크기로 리사이즈
-    inpainted_pil = to_pil_image(inpainted_tensor.squeeze(0).cpu())
-    inpainted_pil = inpainted_pil.resize(image_pil.size, Image.Resampling.LANCZOS)
-
-    return np.array(inpainted_pil)

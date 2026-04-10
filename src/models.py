@@ -21,6 +21,9 @@ class FontClassifierModel(nn.Module):
 
     def forward(self, x):
         feats = self.backbone(x)[-1]
+        # Swin: (B, H, W, C) → (B, C, H, W) / ConvNeXt: 이미 (B, C, H, W)
+        if feats.dim() == 4 and feats.shape[-1] != feats.shape[-2]:
+            feats = feats.permute(0, 3, 1, 2)
         x = self.pool(feats)
         x = torch.flatten(x, 1)
         x = self.neck(x)

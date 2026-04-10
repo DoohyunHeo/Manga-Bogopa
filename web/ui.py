@@ -97,6 +97,17 @@ def _save_all_settings(
     c.SAVE_DEBUG_CROPS = save_debug_crops
     c.DRAW_DEBUG_BOXES = draw_debug_boxes
     config.save()
+
+    # Gemini 모델이 변경되었으면 세션 재초기화
+    if app_state.is_ready:
+        try:
+            from src import model_loader
+            new_session = model_loader._initialize_gemini()
+            app_state.pipeline.models['translator'] = new_session
+            return "설정이 저장되었습니다. Gemini 세션이 재초기화되었습니다."
+        except Exception as e:
+            return f"설정은 저장되었지만 Gemini 재초기화 실패: {e}"
+
     return "설정이 저장되었습니다."
 
 

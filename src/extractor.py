@@ -136,7 +136,7 @@ def _prepare_crops(text_items, batch_images_rgb, batch_paths):
     return crops_for_ocr
 
 
-def _predict_font_properties(font_classifier_model, text_items):
+def _predict_font_properties(font_classifier_model, text_items, page_height=1600):
     """폰트 스타일, 각도, 크기를 통합 모델로 예측합니다."""
     if not font_classifier_model:
         return [{'font_size': config.DEFAULT_FONT_SIZE, 'angle': 0, 'font_style': 'standard'}] * len(text_items)
@@ -158,11 +158,12 @@ def _predict_font_properties(font_classifier_model, text_items):
             outputs = font_classifier_model(image_tensors)
             pred_angles = outputs['angle'].cpu().numpy()
             pred_style_indices = torch.argmax(outputs['style'], dim=1).cpu().numpy()
-            # 통합 모델이면 size 출력 있음, 구 모델이면 없음
+            # 통합 모델: size는 페이지 대비 비율로 출력됨
+            # 구 모델: size는 절대 px로 출력됨
             if 'size' in outputs:
-                pred_sizes = outputs['size'].cpu().numpy()
+                pred_size_ratios = outputs['size'].cpu().numpy()
             else:
-                pred_sizes = [config.DEFAULT_FONT_SIZE] * len(batch_items)
+                pred_size_ratios = None
 
         for j in range(len(batch_items)):
             if 0 in font_classifier_model.style_mapping:
@@ -171,8 +172,14 @@ def _predict_font_properties(font_classifier_model, text_items):
                 style_idx = str(pred_style_indices[j])
 
             style_name = font_classifier_model.style_mapping.get(style_idx, 'standard')
+
+            if pred_size_ratios is not None:
+                font_size = int(round(pred_size_ratios[j] * page_height))
+            else:
+                font_size = config.DEFAULT_FONT_SIZE
+
             all_props.append({
-                'font_size': int(round(pred_sizes[j])),
+                'font_size': font_size,
                 'angle': int(pred_angles[j]),
                 'font_style': style_name
             })
@@ -192,8 +199,9 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
     logger.info(f"{len(crops_for_ocr)}개의 텍스트 조각을 Batch OCR 처리 중...")
     all_ocr_results = models['ocr'](crops_for_ocr)
 
-    # 3. 폰트 속성 예측
-    all_props = _predict_font_properties(models['font_classifier'], text_items)
+    # 3. 폰트 속성 예측 (페이지 높이 기준 비율 → 실제 px 복원)
+    page_height = batch_images_rgb[0].shape[0] if batch_images_rgb else 1600
+    all_props = _predict_font_properties(models['font_classifier'], text_items, page_height=page_height)
 
     # 4. TextElement 객체 생성
     processed_text_elements = []

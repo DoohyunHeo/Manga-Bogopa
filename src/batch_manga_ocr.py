@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class BatchMangaOcr(MangaOcr):
-    def __init__(self, model_name="kha-white/manga-ocr-base", device=None, batch_size=64):
+    def __init__(self, model_name="jzhang533/manga-ocr-base-2025", device=None, batch_size=64):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
 

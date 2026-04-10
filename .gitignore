@@ -12,12 +12,12 @@ __pycache__/
 *.egg-info/
 
 # Project secrets & data
-api_key.txt
 config.json
-prompt.txt
 translation_data.json
 /data
 /ModelTrain
+/runs
+/scripts
 
 # OS
 .DS_Store

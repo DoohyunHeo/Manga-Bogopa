@@ -26,7 +26,7 @@ class PipelineConfig:
     DEBUG_CROPS_DIR: str = "data/debug_crops"
 
     # ── 모델 경로 ──
-    MODEL_PATH: str = "data/models/MangaTextExtractor-V1.pt"
+    MODEL_PATH: str = "data/models/MangaTextExtractor-V2.pt"
     FONT_STYLE_MODEL_PATH: str = "data/models/font_style_analyzer.pth"
 
     # ── 디바이스 (런타임, JSON 제외) ──
@@ -66,7 +66,7 @@ class PipelineConfig:
     FREEFORM_STROKE_WIDTH: int = 2
 
     # ── 이미지 크기 ──
-    IMAGE_SIZE: Tuple[int, int] = (256, 256)
+    IMAGE_SIZE: Tuple[int, int] = (224, 224)
 
     # ── 폰트 맵 ──
     FONT_MAP: Dict[str, str] = field(default_factory=lambda: {

@@ -123,16 +123,6 @@ def _prepare_crops(text_items, batch_images_rgb, batch_paths):
 
         crops_for_ocr.append(original_crop_pil)
 
-        if config.SAVE_DEBUG_CROPS:
-            try:
-                page_name = os.path.splitext(os.path.basename(batch_paths[item['page_idx']]))[0]
-                x1, y1, x2, y2 = coords
-                crop_filename = f"{page_name}_{item['class_name']}_{x1}_{y1}_{x2}_{y2}.png"
-                crop_path = os.path.join(config.DEBUG_CROPS_DIR, crop_filename)
-                ocr_crop_pil.save(crop_path)
-            except Exception as e:
-                logger.warning(f"디버그 크롭 저장 실패: {e}")
-
     return crops_for_ocr
 
 

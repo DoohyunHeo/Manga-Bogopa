@@ -69,7 +69,7 @@ def _save_all_settings(
     enable_vertical, vertical_threshold, min_rotation,
     font_shrink_ratio, min_font, max_font, font_area_fill,
     freeform_stroke_width,
-    save_debug_crops, draw_debug_boxes,
+    draw_debug_boxes,
 ):
     """전체 설정을 config.json에 저장합니다."""
     c = config._config
@@ -94,7 +94,6 @@ def _save_all_settings(
     c.MAX_FONT_SIZE = int(max_font)
     c.FONT_AREA_FILL_RATIO = font_area_fill
     c.FREEFORM_STROKE_WIDTH = int(freeform_stroke_width)
-    c.SAVE_DEBUG_CROPS = save_debug_crops
     c.DRAW_DEBUG_BOXES = draw_debug_boxes
     config.save()
 
@@ -370,8 +369,6 @@ def build_ui() -> gr.Blocks:
                                                info="말풍선 밖 텍스트(효과음, 나레이션 등)의 글자 외곽선 두께")
 
                     with gr.Accordion("디버그", open=False):
-                        s_save_crops = gr.Checkbox(value=c.SAVE_DEBUG_CROPS, label="텍스트 크롭 이미지 저장",
-                                                   info="OCR에 넣은 텍스트 잘라낸 이미지를 debug_crops 폴더에 저장")
                         s_draw_debug = gr.Checkbox(value=c.DRAW_DEBUG_BOXES, label="탐지 영역 시각화",
                                                    info="결과 이미지에 말풍선(빨강), 텍스트(초록), 말풍선 밖 텍스트(파랑) 박스를 표시")
 
@@ -389,7 +386,7 @@ def build_ui() -> gr.Blocks:
                             s_vert, s_vert_thresh, s_min_rot,
                             s_shrink, s_min_font, s_max_font, s_fill,
                             s_stroke_w,
-                            s_save_crops, s_draw_debug,
+                            s_draw_debug,
                         ],
                         outputs=[settings_result],
                     )

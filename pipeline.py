@@ -33,7 +33,6 @@ class MangaTranslationPipeline:
         """전체 만화 번역 및 식자 프로세스를 실행합니다."""
         logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
         logger.info(f"Using device: {config.DEVICE}")
-        os.makedirs(config.DEBUG_CROPS_DIR, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
         image_paths = sorted(glob.glob(os.path.join(config.INPUT_DIR, "*")))
@@ -41,47 +40,21 @@ class MangaTranslationPipeline:
             logger.info(f"'{config.INPUT_DIR}' 폴더에 이미지가 없습니다.")
             return
 
-        # 체크포인트 관리자 초기화
-        ckpt = None
-        if self.enable_checkpoint:
-            ckpt = CheckpointManager(self.output_dir, config.INPUT_DIR)
-            ckpt.load_or_create(len(image_paths))
-
         # --- Pass 1: 탐지 + OCR + 번역 ---
-        if ckpt and ckpt.is_pass1_complete():
-            logger.info("체크포인트에서 Pass 1 데이터를 로드합니다...")
-            all_page_data = ckpt.load_pass1_data()
-        else:
-            remaining_paths = ckpt.get_pass1_remaining_paths(image_paths) if ckpt else image_paths
-            if not remaining_paths:
-                logger.info("Pass 1에서 처리할 이미지가 없습니다.")
-                all_page_data = ckpt.load_pass1_data() if ckpt else []
-            else:
-                new_page_data = self._extract_and_translate_data(remaining_paths, ckpt)
-                if ckpt:
-                    ckpt.mark_pass1_complete()
-                    all_page_data = ckpt.load_pass1_data()
-                else:
-                    all_page_data = new_page_data
-
-            # 체크포인트 없을 때만 별도 JSON 저장 (체크포인트는 배치마다 증분 저장)
-            if not ckpt and all_page_data:
-                json_path = os.path.join(self.output_dir, "translation_data.json")
-                save_page_data_json(all_page_data, json_path)
-                self.callback(ProgressEvent(PipelinePhase.SAVING_JSON, 1, 1, "JSON 저장 완료"))
-                logger.info(f"번역 데이터를 '{json_path}' 파일로 저장했습니다.")
+        all_page_data = self._extract_and_translate_data(image_paths, None)
 
         if not all_page_data:
             logger.info("처리할 데이터가 없어 파이프라인을 종료합니다.")
             return
 
-        # --- Pass 2: 인페인팅 + 렌더링 ---
-        pages_to_process = ckpt.get_pass2_remaining_pages(all_page_data) if ckpt else all_page_data
-        if pages_to_process:
-            self._inpaint_and_draw_streaming(pages_to_process, image_paths, ckpt)
+        # JSON 저장
+        json_path = os.path.join(self.output_dir, "translation_data.json")
+        save_page_data_json(all_page_data, json_path)
+        self.callback(ProgressEvent(PipelinePhase.SAVING_JSON, 1, 1, "JSON 저장 완료"))
+        logger.info(f"번역 데이터를 '{json_path}' 파일로 저장했습니다.")
 
-        if ckpt:
-            ckpt.mark_complete()
+        # --- Pass 2: 인페인팅 + 렌더링 ---
+        self._inpaint_and_draw_streaming(all_page_data, image_paths, None)
 
         self.callback(ProgressEvent(PipelinePhase.COMPLETE, 1, 1, "모든 프로세스 완료"))
         logger.info("모든 프로세스 완료.")

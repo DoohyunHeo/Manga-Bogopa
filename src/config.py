@@ -23,8 +23,6 @@ class PipelineConfig:
     # ── 디렉토리 ──
     INPUT_DIR: str = "data/inputs/"
     OUTPUT_DIR: str = "data/outputs"
-    DEBUG_CROPS_DIR: str = "data/debug_crops"
-
     # ── 모델 경로 ──
     MODEL_PATH: str = "data/models/MangaTextExtractor-V2.pt"
     FONT_STYLE_MODEL_PATH: str = "data/models/font_style_analyzer.pth"
@@ -88,7 +86,6 @@ class PipelineConfig:
     FONT_AREA_FILL_RATIO: float = 0.35
 
     # ── 디버그 ──
-    SAVE_DEBUG_CROPS: bool = True
     DRAW_DEBUG_BOXES: bool = False
 
 

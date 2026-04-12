@@ -32,6 +32,14 @@ def _pick_folder(current_path: str = "") -> str:
 # 초기 설정 (첫 실행)
 # ---------------------------------------------------------------------------
 
+def _get_font_list():
+    """폰트 디렉토리에서 사용 가능한 폰트 파일 목록을 반환합니다."""
+    font_dir = config._config.FONT_DIR
+    if not os.path.isdir(font_dir):
+        return []
+    return sorted([f for f in os.listdir(font_dir) if f.lower().endswith(('.ttf', '.otf', '.ttc'))])
+
+
 def _save_and_initialize(api_key, gemini_model, input_dir, output_dir):
     """설정 저장 → 모델 로딩 → UI 전환."""
     if not api_key.strip():
@@ -68,6 +76,8 @@ def _save_all_settings(
     inpaint_ctx_padding, inpaint_mask_padding,
     enable_vertical, vertical_threshold, min_rotation,
     font_shrink_ratio, min_font, max_font, font_area_fill,
+    font_standard, font_shouting, font_cute, font_narration, font_handwriting,
+    font_pop, font_angry, font_scared, font_embarrassment,
     freeform_stroke_width,
     draw_debug_boxes,
 ):
@@ -93,6 +103,17 @@ def _save_all_settings(
     c.MIN_FONT_SIZE = int(min_font)
     c.MAX_FONT_SIZE = int(max_font)
     c.FONT_AREA_FILL_RATIO = font_area_fill
+    # 폰트 맵 업데이트
+    font_dir = c.FONT_DIR
+    font_selections = {
+        "standard": font_standard, "shouting": font_shouting, "cute": font_cute,
+        "narration": font_narration, "handwriting": font_handwriting, "pop": font_pop,
+        "angry": font_angry, "scared": font_scared, "embarrassment": font_embarrassment,
+    }
+    for style, filename in font_selections.items():
+        if filename:
+            c.FONT_MAP[style] = os.path.join(font_dir, filename)
+
     c.FREEFORM_STROKE_WIDTH = int(freeform_stroke_width)
     c.DRAW_DEBUG_BOXES = draw_debug_boxes
     config.save()
@@ -364,6 +385,17 @@ def build_ui() -> gr.Blocks:
                                            label="텍스트 최소 채움 비율",
                                            info="텍스트가 영역 면적의 이 비율 이하만 차지하면 폰트를 자동으로 키움")
 
+                    with gr.Accordion("폰트 매핑", open=False):
+                        gr.Markdown("각 스타일에 사용할 폰트를 선택하세요.")
+                        _font_files = _get_font_list()
+                        s_font_selects = {}
+                        for style in ["standard", "shouting", "cute", "narration", "handwriting", "pop", "angry", "scared", "embarrassment"]:
+                            current = os.path.basename(c.FONT_MAP.get(style, ""))
+                            s_font_selects[style] = gr.Dropdown(
+                                choices=_font_files, value=current, label=style,
+                                info=f"현재: {current}"
+                            )
+
                     with gr.Accordion("말풍선 밖 텍스트", open=False):
                         s_stroke_w = gr.Number(value=c.FREEFORM_STROKE_WIDTH, label="외곽선 두께 (px)", precision=0,
                                                info="말풍선 밖 텍스트(효과음, 나레이션 등)의 글자 외곽선 두께")
@@ -385,6 +417,9 @@ def build_ui() -> gr.Blocks:
                             s_inpaint_ctx, s_inpaint_mask,
                             s_vert, s_vert_thresh, s_min_rot,
                             s_shrink, s_min_font, s_max_font, s_fill,
+                            s_font_selects["standard"], s_font_selects["shouting"], s_font_selects["cute"],
+                            s_font_selects["narration"], s_font_selects["handwriting"], s_font_selects["pop"],
+                            s_font_selects["angry"], s_font_selects["scared"], s_font_selects["embarrassment"],
                             s_stroke_w,
                             s_draw_debug,
                         ],

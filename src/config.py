@@ -66,7 +66,8 @@ class PipelineConfig:
     # ── 이미지 크기 ──
     IMAGE_SIZE: Tuple[int, int] = (224, 224)
 
-    # ── 폰트 맵 ──
+    # ── 폰트 ──
+    FONT_DIR: str = "data/fonts"
     FONT_MAP: Dict[str, str] = field(default_factory=lambda: {
         "pop": "data/fonts/SDSamliphopangcheTTFOutline.ttf",
         "angry": "data/fonts/a몬스터.ttf",

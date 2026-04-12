@@ -193,18 +193,54 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
     page_height = batch_images_rgb[0].shape[0] if batch_images_rgb else 1600
     all_props = _predict_font_properties(models['font_classifier'], text_items, page_height=page_height)
 
-    # 4. TextElement 객체 생성
+    # 4. TextElement 객체 생성 + 품질 필터링
     processed_text_elements = []
+    filtered_count = 0
     for i, item in enumerate(text_items):
-        if all_ocr_results[i]:
-            element = TextElement(
-                text_box=item['box'].tolist(),
-                original_text=all_ocr_results[i],
-                **all_props[i]
-            )
-            processed_text_elements.append({'element': element, 'page_idx': item['page_idx'], 'class_name': item['class_name']})
+        ocr_text = all_ocr_results[i]
+        if not ocr_text:
+            continue
+        if not _is_valid_text(ocr_text, item['box']):
+            filtered_count += 1
+            continue
+        element = TextElement(
+            text_box=item['box'].tolist(),
+            original_text=ocr_text,
+            **all_props[i]
+        )
+        processed_text_elements.append({'element': element, 'page_idx': item['page_idx'], 'class_name': item['class_name']})
+
+    if filtered_count > 0:
+        logger.info(f"{filtered_count}개 텍스트 필터링됨 (오탐 제거)")
 
     return processed_text_elements
+
+
+def _is_valid_text(text, box):
+    """OCR 결과가 유효한 텍스트인지 검증합니다."""
+    import re
+    text = text.strip()
+    if len(text) == 0:
+        return False
+    if re.fullmatch(r'[\d\s\.\-\+\*/=@#%&:;,!?\(\)\[\]{}<>\"\'`~^|\\/_]+', text):
+        return False
+    if len(text) == 1 and not _is_cjk_or_kana(text[0]):
+        return False
+    x1, y1, x2, y2 = box[:4]
+    if abs(x2 - x1) < 10 or abs(y2 - y1) < 10:
+        return False
+    if not any(_is_cjk_or_kana(c) or c.isalpha() for c in text):
+        return False
+    return True
+
+
+def _is_cjk_or_kana(char):
+    cp = ord(char)
+    return (
+        (0x3040 <= cp <= 0x309F) or (0x30A0 <= cp <= 0x30FF) or
+        (0x4E00 <= cp <= 0x9FFF) or (0xAC00 <= cp <= 0xD7A3) or
+        (0x3400 <= cp <= 0x4DBF) or (0xFF00 <= cp <= 0xFFEF)
+    )
 
 
 def structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, processed_text_elements):

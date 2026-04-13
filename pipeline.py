@@ -20,14 +20,11 @@ logger = logging.getLogger(__name__)
 
 class MangaTranslationPipeline:
     def __init__(self, progress_callback: ProgressCallback = None, enable_checkpoint: bool = True):
-        """파이프라인을 초기화하고 모든 모델을 로드합니다."""
+        """파이프라인을 초기화합니다. 모델은 실행 시점에 지연 로드합니다."""
         self.callback = progress_callback or noop_callback
         self.enable_checkpoint = enable_checkpoint
-        self.output_dir = "data/outputs"
-
-        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 0, 1, "모델 로딩 중..."))
-        self.models = model_loader.load_all_models()
-        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 1, 1, "모델 로딩 완료"))
+        self.output_dir = config.OUTPUT_DIR
+        self.models = {}
 
     def run(self):
         """전체 만화 번역 및 식자 프로세스를 실행합니다."""
@@ -40,24 +37,174 @@ class MangaTranslationPipeline:
             logger.info(f"'{config.INPUT_DIR}' 폴더에 이미지가 없습니다.")
             return
 
+        ckpt = None
+        force_fresh_pass1 = self._has_full_output_image_set(image_paths)
+        if self.enable_checkpoint:
+            ckpt = CheckpointManager(self.output_dir, config.INPUT_DIR)
+            ckpt.load_or_create(len(image_paths))
+            if force_fresh_pass1:
+                logger.info(
+                    "출력 폴더에 입력 전체와 동일한 결과 이미지가 이미 있어 "
+                    "체크포인트를 재사용하지 않고 새 번역을 시작합니다."
+                )
+                ckpt.reset_for_new_run(clear_json=True)
+
         # --- Pass 1: 탐지 + OCR + 번역 ---
-        all_page_data = self._extract_and_translate_data(image_paths, None)
+        all_page_data = self._prepare_pass1_data(
+            image_paths,
+            ckpt,
+            force_fresh=force_fresh_pass1,
+        )
 
         if not all_page_data:
             logger.info("처리할 데이터가 없어 파이프라인을 종료합니다.")
             return
 
-        # JSON 저장
         json_path = os.path.join(self.output_dir, "translation_data.json")
-        save_page_data_json(all_page_data, json_path)
+        if ckpt:
+            ckpt.replace_pass1_data(all_page_data, complete=True)
+        else:
+            save_page_data_json(all_page_data, json_path)
         self.callback(ProgressEvent(PipelinePhase.SAVING_JSON, 1, 1, "JSON 저장 완료"))
         logger.info(f"번역 데이터를 '{json_path}' 파일로 저장했습니다.")
 
         # --- Pass 2: 인페인팅 + 렌더링 ---
-        self._inpaint_and_draw_streaming(all_page_data, image_paths, None)
+        pages_to_process = ckpt.get_pass2_remaining_pages(all_page_data) if ckpt else all_page_data
+        if pages_to_process:
+            self._ensure_inpainting_model()
+            self._inpaint_and_draw_streaming(pages_to_process, image_paths, ckpt)
+        else:
+            logger.info("Pass 2 체크포인트가 이미 완료되어 렌더링을 건너뜁니다.")
+
+        if ckpt:
+            ckpt.mark_complete()
 
         self.callback(ProgressEvent(PipelinePhase.COMPLETE, 1, 1, "모든 프로세스 완료"))
         logger.info("모든 프로세스 완료.")
+
+    def _ensure_pass1_models(self):
+        """탐지, OCR, 폰트 분석, 번역에 필요한 모델만 로드합니다."""
+        missing = {
+            "detection",
+            "ocr",
+            "font_classifier",
+            "translator",
+        } - set(self.models.keys())
+        if not missing:
+            return
+
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 0, 1, "Pass 1 모델 로딩 중..."))
+        if "detection" in missing or "ocr" in missing:
+            self.models.update(model_loader.load_detection_ocr_models())
+        if "font_classifier" in missing:
+            self.models.update(model_loader.load_font_model())
+        if "translator" in missing:
+            self.models["translator"] = model_loader.load_translator_session()
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 1, 1, "Pass 1 모델 로딩 완료"))
+
+    def _ensure_inpainting_model(self):
+        """Pass 2 렌더링에 필요한 Inpainting 모델만 로드합니다."""
+        if "inpainting" in self.models:
+            return
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 0, 1, "Inpainting 모델 로딩 중..."))
+        self.models.update(model_loader.load_inpainting_model())
+        self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 1, 1, "Inpainting 모델 로딩 완료"))
+
+    def _prepare_pass1_data(self, image_paths, ckpt=None, force_fresh=False):
+        """체크포인트를 재사용하거나 필요한 페이지만 Pass 1을 수행합니다."""
+        if force_fresh:
+            self._ensure_pass1_models()
+            return self._extract_and_translate_data(image_paths, ckpt)
+
+        if not ckpt:
+            self._ensure_pass1_models()
+            return self._extract_and_translate_data(image_paths, None)
+
+        existing_page_data = ckpt.load_pass1_data()
+        if existing_page_data:
+            existing_page_data = self._sort_page_data_by_input_order(existing_page_data, image_paths)
+            completed_pages, incomplete_pages = self._split_translated_pages(existing_page_data)
+            expected_pages = {os.path.basename(path) for path in image_paths}
+            completed_names = {page.source_page for page in completed_pages}
+
+            if completed_names == expected_pages and not incomplete_pages:
+                logger.info(
+                    f"완전한 체크포인트 JSON을 재사용합니다: {len(completed_pages)}페이지"
+                )
+                ckpt.replace_pass1_data(completed_pages, complete=True)
+                return completed_pages
+
+            if completed_pages or incomplete_pages:
+                logger.info(
+                    f"Pass 1 체크포인트 재개: 완료 {len(completed_pages)}페이지, 재처리 {len(incomplete_pages)}페이지"
+                )
+                ckpt.replace_pass1_data(completed_pages, complete=False)
+        else:
+            completed_pages = []
+
+        completed_names = {page.source_page for page in completed_pages}
+        remaining_paths = [
+            path for path in image_paths
+            if os.path.basename(path) not in completed_names
+        ]
+
+        if not remaining_paths:
+            return completed_pages
+
+        self._ensure_pass1_models()
+        new_page_data = self._extract_and_translate_data(remaining_paths, ckpt)
+        return self._sort_page_data_by_input_order(completed_pages + new_page_data, image_paths)
+
+    @staticmethod
+    def _is_text_translated(text: str) -> bool:
+        if text is None:
+            return False
+        normalized = text.strip()
+        return bool(normalized) and normalized != "번역 불가"
+
+    def _is_page_translated(self, page_data: PageData) -> bool:
+        for bubble in page_data.speech_bubbles:
+            if not self._is_text_translated(bubble.text_element.translated_text):
+                return False
+        for freeform_text in page_data.freeform_texts:
+            if not self._is_text_translated(freeform_text.translated_text):
+                return False
+        return True
+
+    def _split_translated_pages(self, page_data_list):
+        completed = []
+        incomplete = []
+        for page_data in page_data_list:
+            if self._is_page_translated(page_data):
+                completed.append(page_data)
+            else:
+                incomplete.append(page_data)
+        return completed, incomplete
+
+    @staticmethod
+    def _sort_page_data_by_input_order(page_data_list, image_paths):
+        ordered = {page_data.source_page: page_data for page_data in page_data_list}
+        return [
+            ordered[os.path.basename(path)]
+            for path in image_paths
+            if os.path.basename(path) in ordered
+        ]
+
+    def _has_full_output_image_set(self, image_paths):
+        """출력 폴더에 입력 전체와 동일한 이름의 결과 이미지가 이미 있는지 확인합니다."""
+        if not os.path.isdir(self.output_dir):
+            return False
+
+        input_names = {os.path.basename(path) for path in image_paths}
+        if not input_names:
+            return False
+
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+        output_names = {
+            name for name in os.listdir(self.output_dir)
+            if os.path.splitext(name)[1].lower() in image_exts
+        }
+        return input_names.issubset(output_names)
 
     def _extract_and_translate_data(self, image_paths, ckpt=None):
         """이미지에서 데이터를 추출하고 번역합니다."""

@@ -55,11 +55,11 @@ def _save_and_initialize(api_key, gemini_model, input_dir, output_dir):
         config._config.OUTPUT_DIR = output_dir.strip()
     config.save()
 
-    yield ("설정 저장 완료. 모델을 로딩합니다... (10~30초 소요)", gr.update(visible=True), gr.update(visible=False))
+    yield ("설정 저장 완료. 파이프라인을 초기화합니다...", gr.update(visible=True), gr.update(visible=False))
 
     try:
         app_state.initialize_pipeline()
-        yield ("준비 완료!", gr.update(visible=False), gr.update(visible=True))
+        yield ("준비 완료! 모델은 실행 시점에 로드됩니다.", gr.update(visible=False), gr.update(visible=True))
     except Exception as e:
         yield (f"모델 로딩 실패: {e}", gr.update(visible=True), gr.update(visible=False))
 

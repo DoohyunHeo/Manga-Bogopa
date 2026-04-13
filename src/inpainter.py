@@ -13,6 +13,19 @@ from src import config
 from src.data_models import PageData
 
 
+def _clip_coords_to_image(image, coords):
+    """텍스트 박스를 이미지 경계로 자르고, 유효하지 않으면 None을 반환합니다."""
+    img_h, img_w = image.shape[:2]
+    x1, y1, x2, y2 = coords
+    x1 = max(0, min(img_w, int(np.floor(x1))))
+    y1 = max(0, min(img_h, int(np.floor(y1))))
+    x2 = max(0, min(img_w, int(np.ceil(x2))))
+    y2 = max(0, min(img_h, int(np.ceil(y2))))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
 def inpaint_pages_in_batch(models, all_page_data: List[PageData]) -> List[np.ndarray]:
     """
     여러 페이지의 모든 텍스트 영역을 하나의 배치로 Inpaint합니다.
@@ -41,10 +54,18 @@ def inpaint_pages_in_batch(models, all_page_data: List[PageData]) -> List[np.nda
         img_h, img_w = page_data.image_rgb.shape[:2]
 
         for coords in all_coords_to_erase:
-            x1, y1, x2, y2 = map(int, coords)
+            clipped_coords = _clip_coords_to_image(page_data.image_rgb, coords)
+            if clipped_coords is None:
+                logger.debug(f"Skipping invalid inpaint box: {coords}")
+                continue
+
+            x1, y1, x2, y2 = clipped_coords
             pad = config.INPAINT_CONTEXT_PADDING
             ctx_x1, ctx_y1 = max(0, x1 - pad), max(0, y1 - pad)
             ctx_x2, ctx_y2 = min(img_w, x2 + pad), min(img_h, y2 + pad)
+            if ctx_x2 <= ctx_x1 or ctx_y2 <= ctx_y1:
+                logger.debug(f"Skipping empty inpaint context: {coords} -> {(ctx_x1, ctx_y1, ctx_x2, ctx_y2)}")
+                continue
 
             context_patch = page_data.image_rgb[ctx_y1:ctx_y2, ctx_x1:ctx_x2]
             patch_mask = full_page_mask[ctx_y1:ctx_y2, ctx_x1:ctx_x2]
@@ -130,7 +151,11 @@ def create_mask_from_coords(image, list_of_coords, padding=0):
     """
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     for coords in list_of_coords:
-        x1, y1, x2, y2 = map(int, coords)
+        clipped_coords = _clip_coords_to_image(image, coords)
+        if clipped_coords is None:
+            continue
+
+        x1, y1, x2, y2 = clipped_coords
 
         # 패딩 적용 및 이미지 경계 확인
         padded_x1 = max(0, x1 - padding)

@@ -4,7 +4,7 @@ import os
 from typing import List, Optional
 
 from src.data_models import PageData
-from src.serialization import load_page_data_json, append_page_data_json
+from src.serialization import load_page_data_json, append_page_data_json, save_page_data_json
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,37 @@ class CheckpointManager:
         if os.path.exists(self.json_path):
             return load_page_data_json(self.json_path)
         return []
+
+    def replace_pass1_data(self, page_data_list: List[PageData], complete: bool):
+        """Pass 1 JSON을 현재 상태로 교체하고 메타데이터를 동기화합니다."""
+        save_page_data_json(page_data_list, self.json_path)
+        source_pages = [pd.source_page for pd in page_data_list]
+        self._meta["pass1_completed_pages"] = source_pages
+        self._meta["pass1_complete"] = complete
+        self._meta["pass2_completed_pages"] = [
+            page for page in self._meta.get("pass2_completed_pages", [])
+            if page in set(source_pages)
+        ]
+        self._meta["pass2_complete"] = complete and (
+            len(self._meta["pass2_completed_pages"]) == len(source_pages)
+        )
+        self._save_meta()
+        logger.info(
+            f"체크포인트 동기화: Pass 1 {len(source_pages)}페이지, complete={complete}"
+        )
+
+    def reset_for_new_run(self, clear_json: bool = True):
+        """새 번역 실행을 위해 체크포인트 상태를 초기화합니다."""
+        self._meta["pass1_completed_pages"] = []
+        self._meta["pass1_complete"] = False
+        self._meta["pass2_completed_pages"] = []
+        self._meta["pass2_complete"] = False
+        self._save_meta()
+
+        if clear_json:
+            save_page_data_json([], self.json_path)
+
+        logger.info("체크포인트를 새 실행 상태로 초기화했습니다.")
 
     # --- Pass 2 ---
 

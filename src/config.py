@@ -56,6 +56,13 @@ class PipelineConfig:
     VERTICAL_TOLERANCE_RATIO: float = 0.05
     MIN_ROTATION_ANGLE: int = 2
     FONT_SHRINK_THRESHOLD_RATIO: float = 0.75
+    MODEL_FONT_SIZE_FLOOR_RATIO: float = 0.9
+    MODEL_FONT_SIZE_CEILING_RATIO: float = 1.2
+    MIN_READABLE_TEXT_SIZE: int = 16
+    DEFAULT_TEXT_OVERSAMPLE: int = 2
+    SMALL_TEXT_OVERSAMPLE: int = 3
+    TALL_BUBBLE_RATIO: float = 1.8
+    TALL_BUBBLE_MIN_CHARS: int = 8
 
     # ── 말풍선 밖 텍스트 ──
     FREEFORM_PADDING_RATIO: float = 0.05

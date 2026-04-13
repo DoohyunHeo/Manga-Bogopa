@@ -11,8 +11,8 @@ Adobe Photoshop과 동일한 HarfBuzz 텍스트 엔진 기반.
 """
 import functools
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
 import numpy as np
 import skia
@@ -24,31 +24,47 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TextStyle:
     """텍스트 스타일 프리셋."""
-    color: Tuple[int, int, int] = (76, 76, 76)
-    letter_spacing: float = -2.0       # px, 음수=좁게
-    horizontal_scale: float = 0.9      # 가로 비율 (0.9 = 평체 90%, 세로로 길쭉)
-    line_spacing: float = 1.1          # 행간 배율
+    color: Tuple[int, int, int] = (0, 0, 0)
+    letter_spacing: float = -0.6       # px, 음수=좁게
+    horizontal_scale: float = 0.94     # 장평. 1.0보다 작을수록 세로로 길쭉한 인상
+    line_spacing: float = 1.18         # 행간 배율
     stroke_width: float = 0.0          # 외곽선 두께 (0=없음)
     stroke_color: Tuple[int, int, int] = (255, 255, 255)
+    embolden: bool = False
+    oversample_scale: int = 2
+    subpixel: bool = True
+    baseline_snap: bool = True
+    linear_metrics: bool = True
+    hinting: str = "full"
 
 
 # 스타일별 프리셋 (만화 식자 표준)
 DEFAULT_STYLES: Dict[str, TextStyle] = {
-    "standard":     TextStyle(color=(76, 76, 76), letter_spacing=-2.0, horizontal_scale=0.9, line_spacing=1.1),
-    "shouting":     TextStyle(color=(0, 0, 0), letter_spacing=-1.0, horizontal_scale=0.85, line_spacing=1.0),
-    "cute":         TextStyle(color=(50, 50, 50), letter_spacing=0.0, horizontal_scale=0.95, line_spacing=1.15),
-    "narration":    TextStyle(color=(60, 60, 60), letter_spacing=0.0, horizontal_scale=0.95, line_spacing=1.2),
-    "handwriting":  TextStyle(color=(40, 40, 40), letter_spacing=1.0, horizontal_scale=1.0, line_spacing=1.1),
-    "pop":          TextStyle(color=(0, 0, 0), letter_spacing=-1.0, horizontal_scale=0.9, line_spacing=1.0),
-    "angry":        TextStyle(color=(0, 0, 0), letter_spacing=-1.0, horizontal_scale=0.85, line_spacing=1.0),
-    "scared":       TextStyle(color=(0, 0, 0), letter_spacing=0.0, horizontal_scale=1.0, line_spacing=1.1),
-    "embarrassment": TextStyle(color=(60, 60, 60), letter_spacing=0.0, horizontal_scale=1.0, line_spacing=1.1),
+    "standard": TextStyle(color=(0, 0, 0), letter_spacing=-0.6, horizontal_scale=0.94, line_spacing=1.18),
+    "shouting": TextStyle(
+        color=(0, 0, 0), letter_spacing=-0.35, horizontal_scale=0.90, line_spacing=1.08,
+        embolden=True, oversample_scale=3
+    ),
+    "cute": TextStyle(color=(10, 10, 10), letter_spacing=-0.2, horizontal_scale=0.96, line_spacing=1.16),
+    "narration": TextStyle(color=(12, 12, 12), letter_spacing=-0.15, horizontal_scale=0.96, line_spacing=1.22),
+    "handwriting": TextStyle(color=(10, 10, 10), letter_spacing=0.0, horizontal_scale=0.98, line_spacing=1.12),
+    "pop": TextStyle(
+        color=(0, 0, 0), letter_spacing=-0.4, horizontal_scale=0.91, line_spacing=1.05,
+        embolden=True, oversample_scale=3
+    ),
+    "angry": TextStyle(
+        color=(0, 0, 0), letter_spacing=-0.35, horizontal_scale=0.89, line_spacing=1.06,
+        embolden=True, oversample_scale=3
+    ),
+    "scared": TextStyle(color=(0, 0, 0), letter_spacing=-0.1, horizontal_scale=0.98, line_spacing=1.12),
+    "embarrassment": TextStyle(color=(18, 18, 18), letter_spacing=-0.1, horizontal_scale=0.98, line_spacing=1.12),
 }
 
 # 말풍선 밖 텍스트 기본 스타일 (외곽선 포함)
 FREEFORM_STYLE = TextStyle(
-    color=(0, 0, 0), letter_spacing=-1.0, horizontal_scale=0.9,
-    line_spacing=1.0, stroke_width=2.0, stroke_color=(255, 255, 255),
+    color=(0, 0, 0), letter_spacing=-0.25, horizontal_scale=0.94,
+    line_spacing=1.08, stroke_width=2.0, stroke_color=(255, 255, 255),
+    embolden=True, oversample_scale=3,
 )
 
 
@@ -84,11 +100,26 @@ def replace_unsupported_chars(text: str, font_path: str) -> str:
     return text
 
 
-def _make_font(font_path: str, font_size: int) -> skia.Font:
+def _make_font(font_path: str, font_size: int, style: TextStyle) -> skia.Font:
     """skia.Font 객체 생성."""
     typeface = _load_typeface(font_path)
     font = skia.Font(typeface, font_size)
-    font.setEdging(skia.Font.Edging.kSubpixelAntiAlias)
+    font.setScaleX(style.horizontal_scale)
+    font.setSubpixel(style.subpixel)
+    font.setBaselineSnap(style.baseline_snap)
+    font.setLinearMetrics(style.linear_metrics)
+    font.setEmbolden(style.embolden)
+    font.setEdging(
+        skia.Font.Edging.kSubpixelAntiAlias
+        if style.subpixel else skia.Font.Edging.kAntiAlias
+    )
+    hinting = {
+        "none": skia.FontHinting.kNone,
+        "slight": skia.FontHinting.kSlight,
+        "normal": skia.FontHinting.kNormal,
+        "full": skia.FontHinting.kFull,
+    }.get(style.hinting, skia.FontHinting.kFull)
+    font.setHinting(hinting)
     return font
 
 
@@ -114,9 +145,9 @@ def measure_line(text: str, font_path: str, font_size: int, style: TextStyle = N
     Pillow의 font.getlength() 대체."""
     if style is None:
         style = DEFAULT_STYLES["standard"]
-    font = _make_font(font_path, font_size)
+    font = _make_font(font_path, font_size, style)
     _, _, width = _compute_glyph_positions(font, text, style.letter_spacing)
-    return width * style.horizontal_scale
+    return width
 
 
 def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = None) -> Tuple[float, float]:
@@ -124,7 +155,7 @@ def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = N
     Pillow의 draw.multiline_textbbox() 대체."""
     if style is None:
         style = DEFAULT_STYLES["standard"]
-    font = _make_font(font_path, font_size)
+    font = _make_font(font_path, font_size, style)
     lines = text.split('\n')
     max_width = 0.0
     for line in lines:
@@ -134,7 +165,105 @@ def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = N
     line_height = font_size * style.line_spacing
     total_height = line_height * len(lines)
 
-    return max_width * style.horizontal_scale, total_height
+    return max_width, total_height
+
+
+def _build_text_layout(text: str, font_path: str, font_size: int, style: TextStyle):
+    """줄 단위 렌더링에 필요한 레이아웃 정보를 계산합니다."""
+    font = _make_font(font_path, font_size, style)
+    line_height = font_size * style.line_spacing
+    lines_data = []
+    max_width = 0.0
+
+    for line in text.split('\n'):
+        glyphs, x_positions, line_width = _compute_glyph_positions(font, line, style.letter_spacing)
+        lines_data.append((glyphs, x_positions, line_width))
+        max_width = max(max_width, line_width)
+
+    return {
+        "font": font,
+        "line_height": line_height,
+        "text_width": max_width,
+        "text_height": line_height * len(lines_data),
+        "lines_data": lines_data,
+    }
+
+
+def _paint_text_blob(canvas: skia.Canvas, font: skia.Font, glyphs, positioned_x, baseline_y, style: TextStyle):
+    """하나의 줄을 stroke/fill 순으로 그립니다."""
+    if style.stroke_width > 0:
+        stroke_paint = skia.Paint(
+            Color=skia.Color(*style.stroke_color),
+            AntiAlias=True,
+            Style=skia.Paint.kStroke_Style,
+            StrokeWidth=style.stroke_width,
+            StrokeJoin=skia.Paint.kRound_Join,
+        )
+        builder = skia.TextBlobBuilder()
+        builder.allocRunPosH(font, glyphs, positioned_x, baseline_y)
+        canvas.drawTextBlob(builder.make(), 0, 0, stroke_paint)
+
+    fill_paint = skia.Paint(Color=skia.Color(*style.color), AntiAlias=True)
+    builder = skia.TextBlobBuilder()
+    builder.allocRunPosH(font, glyphs, positioned_x, baseline_y)
+    canvas.drawTextBlob(builder.make(), 0, 0, fill_paint)
+
+
+def _render_text_layer(
+    text: str,
+    font_path: str,
+    font_size: int,
+    style: TextStyle,
+    align: str = "center",
+):
+    """텍스트만 들어간 투명 레이어를 생성합니다."""
+    oversample = max(1, style.oversample_scale)
+    oversampled_style = TextStyle(
+        color=style.color,
+        letter_spacing=style.letter_spacing * oversample,
+        horizontal_scale=style.horizontal_scale,
+        line_spacing=style.line_spacing,
+        stroke_width=style.stroke_width * oversample,
+        stroke_color=style.stroke_color,
+        embolden=style.embolden,
+        oversample_scale=1,
+        subpixel=style.subpixel,
+        baseline_snap=style.baseline_snap,
+        linear_metrics=style.linear_metrics,
+        hinting=style.hinting,
+    )
+    layout = _build_text_layout(text, font_path, font_size * oversample, oversampled_style)
+    padding = max(4, int(round(font_size * 0.35)))
+    layer_width = max(1, int(np.ceil(layout["text_width"] / oversample)) + padding * 2)
+    layer_height = max(1, int(np.ceil(layout["text_height"] / oversample)) + padding * 2)
+
+    surface = skia.Surface(layer_width * oversample, layer_height * oversample)
+    canvas = surface.getCanvas()
+    canvas.clear(skia.ColorTRANSPARENT)
+
+    start_x = padding * oversample
+    start_y = padding * oversample
+    max_width = layout["text_width"]
+
+    for line_index, (glyphs, x_positions, line_width) in enumerate(layout["lines_data"]):
+        if not glyphs:
+            continue
+        if align == "left":
+            x_offset = start_x
+        elif align == "right":
+            x_offset = start_x + (max_width - line_width)
+        else:
+            x_offset = start_x + (max_width - line_width) / 2
+
+        baseline_y = start_y + layout["line_height"] * (line_index + 0.82)
+        positioned_x = [x + x_offset for x in x_positions]
+        _paint_text_blob(canvas, layout["font"], glyphs, positioned_x, baseline_y, oversampled_style)
+
+    snapshot = Image.fromarray(surface.makeImageSnapshot().toarray(), mode="RGBA")
+    if oversample > 1:
+        snapshot = snapshot.resize((layer_width, layer_height), resample=Image.Resampling.LANCZOS)
+
+    return snapshot, layer_width, layer_height, padding
 
 
 def render_text_on_image(
@@ -165,41 +294,15 @@ def render_text_on_image(
     """
     if style is None:
         style = DEFAULT_STYLES["standard"]
-
-    img_np = np.array(img_pil.convert('RGBA'))
-    h, w = img_np.shape[:2]
-
-    # skia Surface 생성 (RGBA)
-    surface = skia.Surface(w, h)
-    canvas = surface.getCanvas()
-
-    # 기존 이미지를 skia canvas에 그리기
-    skia_image = skia.Image.fromarray(img_np, colorType=skia.kRGBA_8888_ColorType)
-    canvas.drawImage(skia_image, 0, 0)
-
-    font = _make_font(font_path, font_size)
-    lines = text.split('\n')
-    line_height = font_size * style.line_spacing
-
-    # 전체 텍스트 크기 계산
-    line_widths = []
-    line_glyphs_data = []
-    for line in lines:
-        glyphs, x_pos, line_w = _compute_glyph_positions(font, line, style.letter_spacing)
-        line_widths.append(line_w)
-        line_glyphs_data.append((glyphs, x_pos, line_w))
-
-    text_width = max(line_widths) if line_widths else 0
-    text_height = line_height * len(lines)
-    scaled_width = text_width * style.horizontal_scale
+    text_width, text_height = measure_text(text, font_path, font_size, style)
 
     # 앵커 기준 좌표 → 좌상단 좌표 변환
     if 'l' in anchor:
         start_x = center_x
     elif 'r' in anchor:
-        start_x = center_x - scaled_width
+        start_x = center_x - text_width
     else:  # 'm' or center
-        start_x = center_x - scaled_width / 2
+        start_x = center_x - text_width / 2
 
     if anchor.endswith('t') or anchor[0] == 't':
         start_y = center_y
@@ -207,60 +310,13 @@ def render_text_on_image(
         start_y = center_y - text_height
     else:  # 'm'
         start_y = center_y - text_height / 2
-
-    # 평체 적용
-    canvas.save()
-    canvas.scale(style.horizontal_scale, 1.0)
-
-    # 줄별 렌더링
-    for line_idx, (glyphs, x_pos, line_w) in enumerate(line_glyphs_data):
-        if not glyphs:
-            continue
-
-        # 정렬에 따른 x 오프셋
-        if align == 'left':
-            x_offset = start_x / style.horizontal_scale
-        elif align == 'right':
-            x_offset = (start_x + scaled_width - line_w * style.horizontal_scale) / style.horizontal_scale
-        else:  # center
-            x_offset = (start_x + (scaled_width - line_w * style.horizontal_scale) / 2) / style.horizontal_scale
-
-        y = start_y + line_height * (line_idx + 0.8)  # baseline 위치 (0.8 = ascent 비율)
-
-        # x 위치에 오프셋 적용
-        positioned_x = [xp + x_offset for xp in x_pos]
-
-        # 스트로크 (외곽선) 먼저
-        if style.stroke_width > 0:
-            stroke_paint = skia.Paint()
-            stroke_paint.setColor(skia.Color(*style.stroke_color))
-            stroke_paint.setAntiAlias(True)
-            stroke_paint.setStyle(skia.Paint.kStroke_Style)
-            stroke_paint.setStrokeWidth(style.stroke_width)
-            stroke_paint.setStrokeJoin(skia.Paint.kRound_Join)
-
-            builder = skia.TextBlobBuilder()
-            builder.allocRunPosH(font, glyphs, positioned_x, y)
-            canvas.drawTextBlob(builder.make(), 0, 0, stroke_paint)
-
-        # 본문 (fill)
-        fill_paint = skia.Paint()
-        fill_paint.setColor(skia.Color(*style.color))
-        fill_paint.setAntiAlias(True)
-
-        builder = skia.TextBlobBuilder()
-        builder.allocRunPosH(font, glyphs, positioned_x, y)
-        canvas.drawTextBlob(builder.make(), 0, 0, fill_paint)
-
-    canvas.restore()
-
-    # skia → numpy → PIL (RGB로 변환)
-    result = surface.makeImageSnapshot().toarray()  # RGBA
-    result_rgb = Image.fromarray(result).convert('RGB')
-    img_pil.paste(result_rgb, (0, 0))
+    text_layer, _, _, padding = _render_text_layer(text, font_path, font_size, style, align)
+    paste_x = int(round(start_x)) - padding
+    paste_y = int(round(start_y)) - padding
+    img_pil.paste(text_layer, (paste_x, paste_y), text_layer)
 
     # 바운딩 박스 반환
-    bbox = (int(start_x), int(start_y), int(start_x + scaled_width), int(start_y + text_height))
+    bbox = (int(start_x), int(start_y), int(start_x + text_width), int(start_y + text_height))
     return bbox
 
 
@@ -279,28 +335,8 @@ def render_rotated_text_on_image(
     if style is None:
         style = DEFAULT_STYLES["standard"]
 
-    # 텍스트 크기 측정
-    text_w, text_h = measure_text(text, font_path, font_size, style)
-    text_w, text_h = int(text_w) + 20, int(text_h) + 20
-
-    # 임시 투명 이미지에 텍스트 렌더링
-    tmp = Image.new('RGBA', (text_w, text_h), (0, 0, 0, 0))
-    # RGBA 임시 이미지에 텍스트 렌더링 (배경 투명)
-    tmp_rgb = Image.new('RGB', (text_w, text_h), (255, 255, 255))
-    render_text_on_image(
-        tmp_rgb, text, text_w / 2, text_h / 2,
-        font_path, font_size, style, align, 'mm'
-    )
-
-    # 알파 채널 생성 (흰색 배경과의 차이로)
-    tmp_np = np.array(tmp_rgb)
-    alpha = 255 - np.min(tmp_np, axis=2)  # 텍스트가 있는 곳은 알파 255
-    tmp_rgba = Image.new('RGBA', (text_w, text_h))
-    tmp_rgba.paste(tmp_rgb, (0, 0))
-    tmp_rgba.putalpha(Image.fromarray(alpha))
-
-    # 회전
-    rotated = tmp_rgba.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+    text_layer, text_w, text_h, _ = _render_text_layer(text, font_path, font_size, style, align)
+    rotated = text_layer.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
 
     # 원본 이미지에 합성
     paste_x = int(center_x - rotated.width / 2)

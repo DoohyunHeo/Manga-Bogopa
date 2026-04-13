@@ -34,20 +34,31 @@ def _initialize_gemini():
     logger.info("Gemini 챗 세션 초기화 완료.")
     return chat_session
 
-def _load_vision_models():
-    """객체 탐지, OCR, Inpainting 모델을 로드합니다."""
+def load_translator_session():
+    """Gemini 번역 세션을 로드합니다."""
+    logger.info("Gemini 챗 세션 초기화 중...")
+    return _initialize_gemini()
+
+
+def load_detection_ocr_models():
+    """객체 탐지와 OCR 모델을 로드합니다."""
     detection_model = YOLO(config.MODEL_PATH)
     detection_model.to(config.DEVICE)
     ocr_model = BatchMangaOcr(batch_size=config.OCR_BATCH_SIZE)
-    lama_model = SimpleLama(device=config.DEVICE)
-    logger.info("Detection, OCR, LaMa 모델 로딩 완료.")
+    logger.info("Detection, OCR 모델 로딩 완료.")
     return {
         'detection': detection_model,
         'ocr': ocr_model,
-        'inpainting': lama_model,
     }
 
-def _load_font_model():
+
+def load_inpainting_model():
+    """Inpainting 모델을 로드합니다."""
+    lama_model = SimpleLama(device=config.DEVICE)
+    logger.info("LaMa 모델 로딩 완료.")
+    return {'inpainting': lama_model}
+
+def load_font_model():
     """폰트 스타일/각도/크기 통합 모델을 로드합니다."""
     font_model = None
     try:
@@ -71,14 +82,16 @@ def load_all_models():
     """모든 AI 모델과 구글 Gemini 챗 세션을 초기화하고 로드합니다."""
     logger.info("AI 모델 및 챗 세션을 초기화합니다...")
 
-    translator_session = _initialize_gemini()
-    vision_models = _load_vision_models()
-    font_models = _load_font_model()
+    translator_session = load_translator_session()
+    detection_ocr_models = load_detection_ocr_models()
+    inpainting_model = load_inpainting_model()
+    font_models = load_font_model()
 
     logger.info("모든 모델 초기화 완료.")
 
     return {
-        **vision_models,
+        **detection_ocr_models,
+        **inpainting_model,
         **font_models,
         'translator': translator_session
     }

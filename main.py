@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 
 def main():
     if config.is_configured():
-        logger.info("모델 로딩 중... (10~30초 소요)")
+        logger.info("파이프라인 초기화 중...")
         app_state.initialize_pipeline()
-        logger.info("모델 로딩 완료.")
+        logger.info("파이프라인 초기화 완료. 모델은 실행 시점에 로드됩니다.")
     else:
         logger.info("초기 설정이 필요합니다. 웹 브라우저에서 설정을 완료하세요.")
 

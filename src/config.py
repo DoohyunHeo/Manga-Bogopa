@@ -182,12 +182,12 @@ class PipelineConfig:
             self.FONT_CHAR_FIT_ENABLED = False
             self.FONT_STROKE_FIT_ENABLED = False
         elif mode == "light":
-            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_SIZE_CORRECTION_ENABLED = True
             self.FONT_CHAR_FIT_ENABLED = True
             self.FONT_STROKE_FIT_ENABLED = False
             self.FONT_CHAR_SCORE_WEIGHT = 25.0
         else:  # "strong"
-            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_SIZE_CORRECTION_ENABLED = True
             self.FONT_CHAR_FIT_ENABLED = True
             self.FONT_STROKE_FIT_ENABLED = True
             self.FONT_CHAR_SCORE_WEIGHT = 42.0

@@ -39,21 +39,28 @@ def run_pipeline_with_events(
         out_dir = output_folder or "data/outputs"
         os.makedirs(out_dir, exist_ok=True)
 
-        if getattr(config, "FONT_SIZE_CORRECTION_ENABLED", True):
+        correction_mode = str(getattr(config, "FONT_SIZE_CORRECTION_MODE", "strong")).lower()
+        if correction_mode == "off":
             yield ProgressEvent(
                 PipelinePhase.FONT_ANALYSIS,
                 0,
                 1,
-                "폰트 크기 보정: 활성화 "
-                f"(floor {config.MODEL_FONT_SIZE_FLOOR_RATIO:.2f}x, "
-                f"ceiling {config.MODEL_FONT_SIZE_CEILING_RATIO:.2f}x)",
+                "폰트 크기 보정: off (모델 예측 크기 그대로 사용)",
             )
         else:
+            sub_modes = []
+            if getattr(config, "FONT_CHAR_FIT_ENABLED", False):
+                sub_modes.append("char_fit")
+            if getattr(config, "FONT_STROKE_FIT_ENABLED", False):
+                sub_modes.append("stroke_fit")
+            sub_label = "+".join(sub_modes) if sub_modes else "cap-only"
             yield ProgressEvent(
                 PipelinePhase.FONT_ANALYSIS,
                 0,
                 1,
-                "폰트 크기 보정: 비활성화 (모델 예측 크기 그대로 사용)",
+                f"폰트 크기 보정: {correction_mode} ({sub_label}, "
+                f"floor {config.MODEL_FONT_SIZE_FLOOR_RATIO:.2f}x, "
+                f"ceiling {config.MODEL_FONT_SIZE_CEILING_RATIO:.2f}x)",
             )
 
         if getattr(config, "FONT_STYLE_FALLBACK_ENABLED", True):

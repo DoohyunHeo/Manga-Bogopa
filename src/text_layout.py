@@ -761,18 +761,47 @@ def _fit_text(element, target_width, target_height, font_path, style):
             char_ratio_target=char_ratio_target,
             char_ratio_reference_height=char_ratio_reference_height,
         )
-    else:
-        wrapped_text, font_size = _find_best_fit_font(
+        return wrapped_text, font_size, vertical
+
+    wrapped_text, font_size = _find_best_fit_font(
+        element.translated_text, element.font_size,
+        target_width,
+        target_height,
+        font_path,
+        style,
+        char_ratio_target=char_ratio_target,
+        char_ratio_reference_height=char_ratio_reference_height,
+    )
+
+    if _should_switch_to_vertical(element, font_size):
+        logger.debug(
+            f"[vertical-switch] text='{(element.translated_text or '')[:20]}...' "
+            f"horizontal={font_size} < threshold({config.FONT_SHRINK_THRESHOLD_RATIO}) "
+            f"× predicted({element.font_size}); retrying vertical from predicted size"
+        )
+        vertical_wrapped, vertical_size = _find_best_fit_font_vertical(
             element.translated_text, element.font_size,
-            target_width,
-            target_height,
+            box_width,
+            box_height * (1 + config.VERTICAL_TOLERANCE_RATIO),
             font_path,
             style,
             char_ratio_target=char_ratio_target,
             char_ratio_reference_height=char_ratio_reference_height,
         )
+        return vertical_wrapped, vertical_size, True
 
     return wrapped_text, font_size, vertical
+
+
+def _should_switch_to_vertical(element, fitted_size):
+    """Fall back to vertical when horizontal fit shrank too far below the model's prediction."""
+    if not config.ENABLE_VERTICAL_TEXT:
+        return False
+    if not element.translated_text or ' ' in element.translated_text:
+        return False
+    predicted = max(1, int(element.font_size))
+    threshold = float(getattr(config, "FONT_SHRINK_THRESHOLD_RATIO", 0.75))
+    return fitted_size < predicted * threshold
 
 
 def plan_bubble_text(element, alignment, target_width, target_height, font_path, style):

@@ -382,8 +382,8 @@ def build_ui() -> gr.Blocks:
                         s_min_rot = gr.Number(value=c.MIN_ROTATION_ANGLE, label="회전 무시 각도 (도)", precision=0,
                                               info="예측된 기울기가 이 각도 이하면 회전 없이 수평으로 식자")
                         s_shrink = gr.Slider(0.1, 1.0, value=c.FONT_SHRINK_THRESHOLD_RATIO, step=0.05,
-                                             label="강제 줄바꿈 임계 비율",
-                                             info="폰트를 줄여도 원래 크기의 이 비율 이하가 되면, 가장 긴 줄을 반으로 쪼개서 재시도")
+                                             label="세로쓰기 전환 임계 비율",
+                                             info="가로쓰기 결과가 모델 예측 크기의 이 비율 미만으로 줄어들면 예측 크기로 초기화하고 세로쓰기로 전환")
                         s_min_font = gr.Number(value=c.MIN_FONT_SIZE, label="최소 폰트 크기 (px)", precision=0,
                                                info="이보다 작아지면 폰트 축소를 멈춤")
                         s_max_font = gr.Number(value=c.MAX_FONT_SIZE, label="최대 폰트 크기 (px)", precision=0,

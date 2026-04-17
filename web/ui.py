@@ -72,14 +72,18 @@ def _save_all_settings(
     api_key, gemini_model, system_prompt,
     input_dir, output_dir,
     yolo_thresh, translation_batch, ocr_batch, inpaint_batch,
+    ocr_num_beams, ocr_prefer_local, ocr_warmup,
     bubble_padding_ratio, bubble_edge_margin,
+    bubble_attach_edge_ratio, bubble_attach_min_len_ratio,
     inpaint_ctx_padding, inpaint_mask_padding,
-    enable_vertical, vertical_threshold, min_rotation,
+    enable_vertical, vertical_threshold, vertical_force_aspect, min_rotation,
     font_shrink_ratio, min_font, max_font, font_area_fill,
     size_mode, size_tol, fallback_mode, tta_mode,
     font_standard, font_shouting, font_cute, font_narration, font_handwriting,
     font_pop, font_angry, font_scared, font_embarrassment,
     freeform_stroke_width,
+    freeform_attach_search_px, freeform_attach_min_len_ratio, freeform_attach_text_margin,
+    freeform_style_min_conf,
     draw_debug_boxes,
 ):
     """전체 설정을 config.json에 저장합니다."""
@@ -93,12 +97,18 @@ def _save_all_settings(
     c.TRANSLATION_BATCH_SIZE = int(translation_batch)
     c.OCR_BATCH_SIZE = int(ocr_batch)
     c.INPAINT_BATCH_SIZE = int(inpaint_batch)
+    c.OCR_NUM_BEAMS = max(1, int(ocr_num_beams))
+    c.OCR_PREFER_LOCAL_FILES = bool(ocr_prefer_local)
+    c.OCR_WARMUP_ON_LOAD = bool(ocr_warmup)
     c.BUBBLE_PADDING_RATIO = bubble_padding_ratio
     c.BUBBLE_EDGE_SAFE_MARGIN = int(bubble_edge_margin)
+    c.BUBBLE_ATTACHMENT_EDGE_RATIO = float(bubble_attach_edge_ratio)
+    c.BUBBLE_ATTACHMENT_MIN_LENGTH_RATIO = float(bubble_attach_min_len_ratio)
     c.INPAINT_CONTEXT_PADDING = int(inpaint_ctx_padding)
     c.INPAINT_MASK_PADDING = int(inpaint_mask_padding)
     c.ENABLE_VERTICAL_TEXT = enable_vertical
     c.VERTICAL_TEXT_THRESHOLD = int(vertical_threshold)
+    c.VERTICAL_FORCE_ASPECT_RATIO = float(vertical_force_aspect)
     c.MIN_ROTATION_ANGLE = int(min_rotation)
     c.FONT_SHRINK_THRESHOLD_RATIO = font_shrink_ratio
     c.MIN_FONT_SIZE = int(min_font)
@@ -122,6 +132,10 @@ def _save_all_settings(
             c.FONT_MAP[style] = os.path.join(font_dir, filename)
 
     c.FREEFORM_STROKE_WIDTH = int(freeform_stroke_width)
+    c.FREEFORM_ATTACHMENT_SEARCH_PX = int(freeform_attach_search_px)
+    c.FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO = float(freeform_attach_min_len_ratio)
+    c.FREEFORM_ATTACHMENT_TEXT_MARGIN = int(freeform_attach_text_margin)
+    c.FREEFORM_STYLE_MIN_CONFIDENCE = float(freeform_style_min_conf)
     c.DRAW_DEBUG_BOXES = draw_debug_boxes
     config.save()
 
@@ -360,6 +374,12 @@ def build_ui() -> gr.Blocks:
                                                 info="manga-ocr에 한 번에 넣을 텍스트 크롭 수")
                         s_inpaint_batch = gr.Number(value=c.INPAINT_BATCH_SIZE, label="인페인팅 배치 크기", precision=0,
                                                     info="LaMa에 한 번에 넣을 패치 수. VRAM이 부족하면 줄이세요")
+                        s_ocr_beams = gr.Number(value=c.OCR_NUM_BEAMS, label="OCR beam 수", precision=0,
+                                                info="manga-ocr 디코딩 beam search 폭. 높일수록 정확도↑ 속도↓ (1~5 권장)")
+                        s_ocr_local = gr.Checkbox(value=c.OCR_PREFER_LOCAL_FILES, label="OCR 로컬 캐시 우선",
+                                                  info="허깅페이스에서 새로 받지 않고 로컬 캐시부터 시도 (실패 시 원격 폴백)")
+                        s_ocr_warmup = gr.Checkbox(value=c.OCR_WARMUP_ON_LOAD, label="OCR 워밍업",
+                                                   info="모델 로드 직후 빈 이미지로 1회 추론해 torch.compile 캐시를 미리 채움")
 
                     with gr.Accordion("말풍선 식자", open=False):
                         s_bubble_pad = gr.Slider(0.0, 0.5, value=c.BUBBLE_PADDING_RATIO, step=0.01,
@@ -367,6 +387,12 @@ def build_ui() -> gr.Blocks:
                                                  info="말풍선 폭 대비 좌우 여백. 0.15면 양쪽 15%씩 비워두고 텍스트 배치")
                         s_bubble_edge = gr.Number(value=c.BUBBLE_EDGE_SAFE_MARGIN, label="말풍선 가장자리 안전 거리 (px)", precision=0,
                                                   info="말꼬리가 있는 말풍선에서 텍스트가 가장자리에 너무 붙지 않도록 하는 최소 거리")
+                        s_bubble_attach_edge = gr.Slider(0.02, 0.3, value=c.BUBBLE_ATTACHMENT_EDGE_RATIO, step=0.01,
+                                                         label="말풍선 붙음 감지 스트립 비율",
+                                                         info="말풍선 좌/우 몇 %를 수직선(패널 테두리) 탐지에 사용할지. 0.10 = 좌우 10%씩")
+                        s_bubble_attach_len = gr.Slider(0.3, 1.0, value=c.BUBBLE_ATTACHMENT_MIN_LENGTH_RATIO, step=0.05,
+                                                        label="말풍선 붙음 감지 최소 선 길이 비율",
+                                                        info="말풍선 높이 대비 이 비율 이상 연속된 수직선이 있어야 '붙음'으로 판정")
 
                     with gr.Accordion("인페인팅 (텍스트 지우기)", open=False):
                         s_inpaint_ctx = gr.Number(value=c.INPAINT_CONTEXT_PADDING, label="주변 참조 영역 (px)", precision=0,
@@ -379,6 +405,9 @@ def build_ui() -> gr.Blocks:
                                              info="세로로 긴 텍스트 영역을 감지하면 세로쓰기로 식자")
                         s_vert_thresh = gr.Number(value=c.VERTICAL_TEXT_THRESHOLD, label="세로쓰기 판정 비율", precision=0,
                                                   info="텍스트 영역의 높이/너비가 이 값 이상이면 세로쓰기로 판정")
+                        s_vert_force = gr.Slider(2.0, 20.0, value=c.VERTICAL_FORCE_ASPECT_RATIO, step=0.5,
+                                                 label="세로쓰기 강제 비율",
+                                                 info="높이/너비가 이 값 이상이면 예측 폰트 크기·공백 조건 무시하고 무조건 세로쓰기")
                         s_min_rot = gr.Number(value=c.MIN_ROTATION_ANGLE, label="회전 무시 각도 (도)", precision=0,
                                               info="예측된 기울기가 이 각도 이하면 회전 없이 수평으로 식자")
                         s_shrink = gr.Slider(0.1, 1.0, value=c.FONT_SHRINK_THRESHOLD_RATIO, step=0.05,
@@ -431,6 +460,16 @@ def build_ui() -> gr.Blocks:
                     with gr.Accordion("말풍선 밖 텍스트", open=False):
                         s_stroke_w = gr.Number(value=c.FREEFORM_STROKE_WIDTH, label="외곽선 두께 (px)", precision=0,
                                                info="말풍선 밖 텍스트(효과음, 나레이션 등)의 글자 외곽선 두께")
+                        s_ff_attach_px = gr.Number(value=c.FREEFORM_ATTACHMENT_SEARCH_PX, label="붙음 감지 검색 폭 (px)", precision=0,
+                                                   info="프리텍스트 좌/우로 이 거리 안의 수직선을 찾아 정렬. 페이지 가장자리면 가능한 만큼만 봄")
+                        s_ff_attach_len = gr.Slider(0.3, 1.0, value=c.FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO, step=0.05,
+                                                    label="붙음 감지 최소 선 길이 비율",
+                                                    info="텍스트 박스 높이 대비 이 비율 이상 이어진 수직선이어야 '붙음'으로 판정")
+                        s_ff_attach_margin = gr.Number(value=c.FREEFORM_ATTACHMENT_TEXT_MARGIN, label="붙음 정렬 여백 (px)", precision=0,
+                                                       info="붙음 방향 텍스트 앵커를 원본 박스 가장자리에서 이 픽셀만큼 바깥으로 밀어 패널 선에 더 붙이기")
+                        s_ff_style_conf = gr.Slider(0.3, 1.0, value=c.FREEFORM_STYLE_MIN_CONFIDENCE, step=0.05,
+                                                    label="프리텍스트 스타일 최소 신뢰도",
+                                                    info="이 신뢰도 미만이거나 'standard'로 예측되면 프리텍스트는 narration 폰트로 교체")
 
                     with gr.Accordion("디버그", open=False):
                         s_draw_debug = gr.Checkbox(value=c.DRAW_DEBUG_BOXES, label="탐지 영역 시각화",
@@ -445,15 +484,19 @@ def build_ui() -> gr.Blocks:
                             s_api_key, s_gemini_model, s_prompt,
                             s_input_dir, s_output_dir,
                             s_yolo, s_trans_batch, s_ocr_batch, s_inpaint_batch,
+                            s_ocr_beams, s_ocr_local, s_ocr_warmup,
                             s_bubble_pad, s_bubble_edge,
+                            s_bubble_attach_edge, s_bubble_attach_len,
                             s_inpaint_ctx, s_inpaint_mask,
-                            s_vert, s_vert_thresh, s_min_rot,
+                            s_vert, s_vert_thresh, s_vert_force, s_min_rot,
                             s_shrink, s_min_font, s_max_font, s_fill,
                             s_size_mode, s_size_tol, s_fallback_mode, s_tta_mode,
                             s_font_selects["standard"], s_font_selects["shouting"], s_font_selects["cute"],
                             s_font_selects["narration"], s_font_selects["handwriting"], s_font_selects["pop"],
                             s_font_selects["angry"], s_font_selects["scared"], s_font_selects["embarrassment"],
                             s_stroke_w,
+                            s_ff_attach_px, s_ff_attach_len, s_ff_attach_margin,
+                            s_ff_style_conf,
                             s_draw_debug,
                         ],
                         outputs=[settings_result],

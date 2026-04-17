@@ -291,13 +291,20 @@ def _wrap_text(text, font_path, font_size, style, max_width):
 
 
 def _is_vertical(element, box_width, box_height):
+    if not config.ENABLE_VERTICAL_TEXT or box_width <= 0:
+        return False
+
+    aspect = box_height / box_width
+    # Extreme aspect: force vertical regardless of predicted font size or whitespace.
+    force_threshold = float(getattr(config, "VERTICAL_FORCE_ASPECT_RATIO", 6.0))
+    if aspect >= force_threshold:
+        return True
+
     return (
-        config.ENABLE_VERTICAL_TEXT
-        and box_height > box_width * 1.2
+        box_height > box_width * 1.2
         and element.font_size >= config.MIN_READABLE_TEXT_SIZE
         and ' ' not in element.translated_text
-        and box_width > 0
-        and (box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD)
+        and aspect >= config.VERTICAL_TEXT_THRESHOLD
     )
 
 

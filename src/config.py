@@ -76,6 +76,7 @@ class PipelineConfig:
     # ── 텍스트 렌더링 ──
     ENABLE_VERTICAL_TEXT: bool = True
     VERTICAL_TEXT_THRESHOLD: int = 4
+    VERTICAL_FORCE_ASPECT_RATIO: float = 6.0
     VERTICAL_TOLERANCE_RATIO: float = 0.05
     MIN_ROTATION_ANGLE: int = 2
     FONT_SHRINK_THRESHOLD_RATIO: float = 0.75

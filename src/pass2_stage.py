@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Sequence
 
@@ -9,7 +10,7 @@ import torch
 
 from src import config, inpainter, page_drawer
 from src.data_models import PageData
-from src.progress import PipelinePhase, ProgressCallback, ProgressEvent, noop_callback
+from src.progress import EventLevel, PipelinePhase, ProgressCallback, ProgressEvent, noop_callback
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class Pass2Stage:
             inpainted_images = inpainter.inpaint_pages_in_batch(self.models, loaded_pages)
 
             for page_data, inpainted_image in zip(loaded_pages, inpainted_images):
+                page_started_at = time.perf_counter()
                 final_image_rgb = page_drawer.draw_text_on_image(inpainted_image, page_data)
 
                 if self.debug_draw_boxes and self.debug_box_drawer:
@@ -78,14 +80,20 @@ class Pass2Stage:
                 cv2.imwrite(output_path, final_image_bgr)
 
                 completed_pages += 1
+                page_elapsed = time.perf_counter() - page_started_at
                 self.callback(
                     ProgressEvent(
                         PipelinePhase.PASS2_PAGE,
                         completed_pages,
                         total_pages,
-                        f"{page_data.source_page} 완료",
+                        f"{page_data.source_page} 완료 ({page_elapsed:.1f}초)",
                         page_name=page_data.source_page,
                         image_rgb=final_image_rgb,
+                        elapsed_sec=page_elapsed,
+                        extras={
+                            "bubbles": len(page_data.speech_bubbles),
+                            "freeform": len(page_data.freeform_texts),
+                        },
                     )
                 )
 
@@ -114,17 +122,24 @@ class Pass2Stage:
             images_bgr = list(executor.map(cv2.imread, [path for _, path in batch_entries]))
 
         loaded_pages = []
-        failed_count = 0
+        failed_names = []
         for (page_data, original_path), image_bgr in zip(batch_entries, images_bgr):
             if image_bgr is None:
-                failed_count += 1
+                failed_names.append(page_data.source_page)
                 logger.warning("'%s' 로딩 실패", original_path)
                 continue
             page_data.image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
             loaded_pages.append(page_data)
 
-        if failed_count:
-            logger.warning("%d개의 페이지 로딩에 실패했습니다.", failed_count)
+        if failed_names:
+            logger.warning("%d개의 페이지 로딩에 실패했습니다: %s", len(failed_names), failed_names)
+            self.callback(ProgressEvent(
+                PipelinePhase.PASS2_PAGE, 0, 0,
+                f"식자 단계 이미지 로딩 실패: {', '.join(failed_names[:3])}"
+                f"{'…' if len(failed_names) > 3 else ''}",
+                level=EventLevel.WARNING,
+                extras={"failed_count": len(failed_names), "failed_pages": failed_names},
+            ))
 
         return loaded_pages
 

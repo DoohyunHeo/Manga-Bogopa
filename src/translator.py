@@ -3,7 +3,7 @@ import re
 import time
 from typing import Callable, List, Optional
 from src.data_models import PageData
-from src.progress import ProgressEvent, PipelinePhase
+from src.progress import EventLevel, PipelinePhase, ProgressEvent
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +132,16 @@ def translate_pages_in_batch(chat_session, batch_page_data: List[PageData],
         response_text = _stream_with_retry(chat_session, request_text, callback)
         response_lines = response_text.strip().split('\n')
 
-        if len(response_lines) != len(keyed_items):
+        if len(response_lines) != len(keyed_items) and callback:
             logger.warning(f"응답 줄 수({len(response_lines)})와 요청 수({len(keyed_items)})가 불일치합니다.")
+            callback(ProgressEvent(
+                PipelinePhase.TRANSLATION, len(response_lines), len(keyed_items),
+                f"번역 응답 줄 수 불일치: 요청 {len(keyed_items)}개 vs 응답 {len(response_lines)}개",
+                level=EventLevel.WARNING,
+                extras={"requested": len(keyed_items), "received": len(response_lines)},
+            ))
 
+        unknown_keys = []
         for resp_line in response_lines:
             resp_line = resp_line.strip()
             if not resp_line:
@@ -143,7 +150,16 @@ def translate_pages_in_batch(chat_session, batch_page_data: List[PageData],
             if key and key in keyed_items:
                 keyed_items[key].translated_text = translated
             elif key:
+                unknown_keys.append(key)
                 logger.warning(f"알 수 없는 번호: {key}")
+
+        if unknown_keys and callback:
+            callback(ProgressEvent(
+                PipelinePhase.TRANSLATION, 0, 0,
+                f"번역 응답에 알 수 없는 번호 {len(unknown_keys)}개: {', '.join(unknown_keys[:5])}",
+                level=EventLevel.WARNING,
+                extras={"unknown_keys": unknown_keys},
+            ))
 
         for key, element in keyed_items.items():
             if element.translated_text is None:

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
@@ -17,6 +17,12 @@ class PipelinePhase(StrEnum):
     COMPLETE = "complete"
 
 
+class EventLevel(StrEnum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+
+
 @dataclass
 class ProgressEvent:
     phase: PipelinePhase
@@ -25,6 +31,9 @@ class ProgressEvent:
     message: str
     page_name: Optional[str] = None
     image_rgb: Optional[np.ndarray] = None
+    elapsed_sec: Optional[float] = None
+    level: str = EventLevel.INFO
+    extras: Dict[str, Any] = field(default_factory=dict)
 
 
 ProgressCallback = Callable[[ProgressEvent], None]

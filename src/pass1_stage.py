@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Sequence
 
@@ -8,7 +9,7 @@ import torch
 
 from src import config, extractor, model_loader, translator
 from src.data_models import PageData
-from src.progress import PipelinePhase, ProgressCallback, ProgressEvent, noop_callback
+from src.progress import EventLevel, PipelinePhase, ProgressCallback, ProgressEvent, noop_callback
 from src.serialization import save_page_data_json
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ class Pass1Stage:
             batch_idx = i // batch_size + 1
             logger.info(f"--- Processing Batch {batch_idx}/{total_batches} ---")
             batch_paths = image_paths[i:i + batch_size]
+            batch_started_at = time.perf_counter()
 
             worker_count = min(max(1, int(config.PASS1_IMAGE_LOAD_WORKERS)), len(batch_paths))
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -177,7 +179,17 @@ class Pass1Stage:
 
             failed_count = sum(1 for img in batch_images_bgr if img is None)
             if failed_count > 0:
-                logger.warning(f"{failed_count}개 이미지 로딩 실패")
+                failed_names = [
+                    os.path.basename(p) for p, img in zip(batch_paths, batch_images_bgr) if img is None
+                ]
+                logger.warning(f"{failed_count}개 이미지 로딩 실패: {failed_names}")
+                self.callback(ProgressEvent(
+                    PipelinePhase.PASS1_BATCH, batch_idx, total_batches,
+                    f"배치 {batch_idx}: {failed_count}개 이미지 로딩 실패 ({', '.join(failed_names[:3])}"
+                    f"{'…' if failed_count > 3 else ''})",
+                    level=EventLevel.WARNING,
+                    extras={"failed_count": failed_count, "failed_pages": failed_names},
+                ))
 
             batch_images_rgb = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in batch_images_bgr if img is not None]
             valid_paths = [p for p, img in zip(batch_paths, batch_images_bgr) if img is not None]
@@ -185,16 +197,35 @@ class Pass1Stage:
                 continue
 
             num_pages = len(batch_images_rgb)
+            detection_started_at = time.perf_counter()
             self.callback(ProgressEvent(
                 PipelinePhase.DETECTION, batch_idx, total_batches,
-                f"{num_pages}페이지 말풍선·텍스트 탐지 중..."
+                f"배치 {batch_idx}/{total_batches}: {num_pages}페이지 탐지 중...",
+                extras={"pages": num_pages},
             ))
             all_text_items, all_bubbles_by_page = extractor.detect_objects(self.models["detection"], batch_images_rgb)
+            raw_box_count = len(all_text_items)
+            bubble_count = sum(len(page_bubbles) for page_bubbles in all_bubbles_by_page)
             merged_text_items = extractor.merge_text_boxes(all_text_items)
+            merged_box_count = len(merged_text_items)
+            detection_elapsed = time.perf_counter() - detection_started_at
+            self.callback(ProgressEvent(
+                PipelinePhase.DETECTION, batch_idx, total_batches,
+                f"배치 {batch_idx}: 말풍선 {bubble_count} / 글자 박스 {raw_box_count}→{merged_box_count} 병합",
+                elapsed_sec=detection_elapsed,
+                extras={
+                    "pages": num_pages,
+                    "bubbles": bubble_count,
+                    "raw_boxes": raw_box_count,
+                    "merged_boxes": merged_box_count,
+                },
+            ))
 
+            ocr_started_at = time.perf_counter()
             self.callback(ProgressEvent(
                 PipelinePhase.OCR, batch_idx, total_batches,
-                f"{len(merged_text_items)}개 텍스트 OCR + 폰트 분석 중..."
+                f"배치 {batch_idx}: {merged_box_count}개 글자 조각 인식 + 폰트 분석 중...",
+                extras={"target": merged_box_count},
             ))
             processed_text_elements = extractor.extract_text_properties(
                 self.models,
@@ -202,6 +233,16 @@ class Pass1Stage:
                 merged_text_items,
                 valid_paths,
             )
+            kept_count = len(processed_text_elements)
+            filtered_count = max(0, merged_box_count - kept_count)
+            ocr_elapsed = time.perf_counter() - ocr_started_at
+            self.callback(ProgressEvent(
+                PipelinePhase.OCR, batch_idx, total_batches,
+                f"배치 {batch_idx}: 인식 {kept_count}개 / 품질 필터 {filtered_count}개 제외",
+                elapsed_sec=ocr_elapsed,
+                level=EventLevel.WARNING if filtered_count > 0 and kept_count == 0 else EventLevel.INFO,
+                extras={"kept": kept_count, "filtered": filtered_count, "target": merged_box_count},
+            ))
 
             untranslated_page_data = extractor.structure_page_data(
                 valid_paths,
@@ -211,15 +252,18 @@ class Pass1Stage:
             )
 
             total_texts = sum(len(p.speech_bubbles) + len(p.freeform_texts) for p in untranslated_page_data)
+            translation_started_at = time.perf_counter()
             self.callback(ProgressEvent(
                 PipelinePhase.TRANSLATION, batch_idx, total_batches,
-                f"{total_texts}개 대사 Gemini에 전송 중..."
+                f"배치 {batch_idx}: {total_texts}개 대사 번역 요청 중...",
+                extras={"texts": total_texts},
             ))
             translated_page_data = translator.translate_pages_in_batch(
                 self.models["translator"],
                 untranslated_page_data,
                 callback=self.callback,
             )
+            translation_elapsed = time.perf_counter() - translation_started_at
 
             for page_data in translated_page_data:
                 page_data.image_rgb = None
@@ -228,9 +272,17 @@ class Pass1Stage:
                 ckpt.mark_pass1_batch_complete(translated_page_data)
             all_page_data.extend(translated_page_data)
 
+            batch_elapsed = time.perf_counter() - batch_started_at
             self.callback(ProgressEvent(
                 PipelinePhase.PASS1_BATCH, batch_idx, total_batches,
-                f"배치 {batch_idx}/{total_batches} 완료 ({len(valid_paths)}페이지)"
+                f"배치 {batch_idx}/{total_batches} 완료 ({len(valid_paths)}페이지, {batch_elapsed:.1f}초)",
+                elapsed_sec=batch_elapsed,
+                extras={
+                    "pages": len(valid_paths),
+                    "detection_sec": round(detection_elapsed, 2),
+                    "ocr_sec": round(ocr_elapsed, 2),
+                    "translation_sec": round(translation_elapsed, 2),
+                },
             ))
 
             self._maybe_empty_cache_after_pass1_batch(batch_idx)

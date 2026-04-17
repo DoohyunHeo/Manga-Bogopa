@@ -91,6 +91,12 @@ class PipelineConfig:
     # 신뢰도가 이 값 미만이거나 standard로 판정되면 narration으로 치환.
     FREEFORM_STYLE_MIN_CONFIDENCE: float = 0.70
 
+    # ── 후리가나 컬럼 제거 (세로 일본어 전용) ──
+    # 메인 한자 옆 좁은 후리가나(읽기용 작은 글자) 컬럼이 폰트 크기 예측을 흐릴 수 있어
+    # 폰트 모델 입력 크롭에서만 잘라낸다. OCR 입력엔 영향 없음.
+    VERTICAL_FURIGANA_STRIP_ENABLED: bool = True
+    VERTICAL_FURIGANA_MIN_GAP_RATIO: float = 0.08
+
     # ── 인페인팅 ──
     INPAINT_CONTEXT_PADDING: int = 50
     INPAINT_MASK_PADDING: int = 0

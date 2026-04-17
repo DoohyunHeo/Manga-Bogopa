@@ -112,15 +112,98 @@ def merge_text_boxes(text_items):
     return final_items
 
 
+def _strip_furigana_column(crop_pil):
+    """Remove a narrow side column (likely furigana) from a vertical manga crop.
+
+    Conservative — returns the original crop if any of the guards fail:
+    - feature disabled
+    - not a vertical-oriented crop
+    - too small to analyze
+    - only one dark band detected
+    - the widest band already dominates the crop
+    - no sufficiently wide gap between bands
+
+    Rationale: for vertical Japanese manga text, furigana sits in a narrow column
+    to the right of the main kanji column. Cropping it away gives the font-size
+    model a cleaner signal. OCR input stays untouched.
+    """
+    if not getattr(config, "VERTICAL_FURIGANA_STRIP_ENABLED", True):
+        return crop_pil
+
+    gray = np.array(crop_pil.convert("L"), dtype=np.uint8)
+    h, w = gray.shape
+    if w >= h or h < 30 or w < 12:
+        return crop_pil
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    col_density = binary.sum(axis=0, dtype=np.int32) / 255.0
+
+    smooth_kernel = max(3, w // 10)
+    if smooth_kernel % 2 == 0:
+        smooth_kernel += 1
+    kernel = np.ones(smooth_kernel) / smooth_kernel
+    smoothed = np.convolve(col_density, kernel, mode="same")
+
+    peak = smoothed.max()
+    if peak < 1.0:
+        return crop_pil
+    threshold = peak * 0.15
+    is_dark = smoothed > threshold
+
+    bands = []
+    start = None
+    for idx, flag in enumerate(is_dark):
+        if flag and start is None:
+            start = idx
+        elif not flag and start is not None:
+            bands.append((start, idx))
+            start = None
+    if start is not None:
+        bands.append((start, len(is_dark)))
+
+    if len(bands) < 2:
+        return crop_pil
+
+    widest = max(bands, key=lambda b: b[1] - b[0])
+    widest_w = widest[1] - widest[0]
+    if widest_w >= w * 0.8:
+        return crop_pil
+
+    min_gap = max(2, int(w * float(getattr(config, "VERTICAL_FURIGANA_MIN_GAP_RATIO", 0.08))))
+    # Require at least one gap around the widest band that's >= min_gap wide.
+    sorted_bands = sorted(bands)
+    widest_index = sorted_bands.index(widest)
+    left_gap = widest[0] - sorted_bands[widest_index - 1][1] if widest_index > 0 else widest[0]
+    right_gap = (
+        sorted_bands[widest_index + 1][0] - widest[1]
+        if widest_index < len(sorted_bands) - 1
+        else w - widest[1]
+    )
+    if max(left_gap, right_gap) < min_gap:
+        return crop_pil
+
+    pad = 2
+    left = max(0, widest[0] - pad)
+    right = min(w, widest[1] + pad)
+    if right - left < 10:
+        return crop_pil
+    return crop_pil.crop((left, 0, right, h))
+
+
 def _prepare_crops(text_items, batch_images_rgb, batch_paths):
-    """Prepare crop images for OCR and font analysis."""
+    """Prepare crop images for OCR and font analysis.
+
+    OCR uses the original crop (manga-ocr was trained with furigana present).
+    Font-size/style model uses a furigana-stripped variant so that a narrow
+    phonetic-reading column doesn't skew size predictions.
+    """
     crops_for_ocr = []
     for item in text_items:
         image_rgb = batch_images_rgb[item["page_idx"]]
         coords = item["box"].astype(int)
         original_crop_pil = Image.fromarray(image_rgb[coords[1]:coords[3], coords[0]:coords[2]])
-        item["crop"] = original_crop_pil
         crops_for_ocr.append(original_crop_pil)
+        item["crop"] = _strip_furigana_column(original_crop_pil)
 
     return crops_for_ocr
 

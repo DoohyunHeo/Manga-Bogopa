@@ -543,6 +543,14 @@ def build_ui() -> gr.Blocks:
                                             label="글씨체 판정 정확도 모드",
                                             info="off = 한 번만 판정 (빠름) / fast = 2번 평균 / accurate = 3번 평균 (권장, 약간 느림)"),
                                    'FONT_MODEL_TTA_MODE', str)
+                        reg.setter(gr.Checkbox(value=c.VERTICAL_FURIGANA_STRIP_ENABLED,
+                                               label="세로 일본어 후리가나 자동 제거",
+                                               info="한자 옆 작은 읽기용 글자(후리가나) 컬럼이 글씨 크기 예측을 흐릴 때 잘라냄. 글자 인식에는 영향 없음"),
+                                   'VERTICAL_FURIGANA_STRIP_ENABLED', bool)
+                        reg.setter(gr.Slider(0.02, 0.3, value=c.VERTICAL_FURIGANA_MIN_GAP_RATIO, step=0.01,
+                                             label="후리가나 판정 최소 공백 비율",
+                                             info="메인 글자 컬럼과 후리가나 컬럼 사이 공백이 이 비율 이상일 때만 제거 (낮을수록 공격적)"),
+                                   'VERTICAL_FURIGANA_MIN_GAP_RATIO', float)
 
                     with gr.Accordion("폰트 매핑", open=False):
                         gr.Markdown("각 스타일에 사용할 폰트를 선택하세요.")

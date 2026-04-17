@@ -10,6 +10,21 @@ logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 2
 
+# Ellipsis normalization: Gemini emits ..., …, ．．．, 。。。, ・・・, 점 사이 공백 등 다양한 형태.
+# 모두 U+22EF(⋯)로 통일.
+_ELLIPSIS_SPACED = re.compile(r'(?<=[.\u3002\uff0e\u30fb])\s+(?=[.\u3002\uff0e\u30fb])')
+_ELLIPSIS_RUNS = re.compile(
+    r'[\u2026\u2025]+'                      # …  ‥
+    r'|[.\u3002\uff0e\u30fb]{2,}'           # .. .., 。。。, ．．．, ・・・
+)
+
+
+def _normalize_ellipsis(text: str) -> str:
+    if not text:
+        return text
+    collapsed = _ELLIPSIS_SPACED.sub('', text)
+    return _ELLIPSIS_RUNS.sub('⋯', collapsed)
+
 
 def _stream_with_retry(chat_session, request_text, callback=None):
     """스트리밍으로 API 요청을 보내고 응답을 조합합니다. 실패 시 재시도."""
@@ -74,7 +89,7 @@ def _parse_translation_line(line):
 
     if cleaned == "번역 불가":
         return key, ""
-    return key, cleaned.replace("...", "⋯").replace("…", "⋯")
+    return key, _normalize_ellipsis(cleaned)
 
 
 def translate_pages_in_batch(chat_session, batch_page_data: List[PageData],

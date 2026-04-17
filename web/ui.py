@@ -76,6 +76,7 @@ def _save_all_settings(
     inpaint_ctx_padding, inpaint_mask_padding,
     enable_vertical, vertical_threshold, min_rotation,
     font_shrink_ratio, min_font, max_font, font_area_fill,
+    size_mode, size_tol, fallback_mode, tta_mode,
     font_standard, font_shouting, font_cute, font_narration, font_handwriting,
     font_pop, font_angry, font_scared, font_embarrassment,
     freeform_stroke_width,
@@ -103,6 +104,12 @@ def _save_all_settings(
     c.MIN_FONT_SIZE = int(min_font)
     c.MAX_FONT_SIZE = int(max_font)
     c.FONT_AREA_FILL_RATIO = font_area_fill
+    # 폰트 모델 동작 (고수준 모드 → 저수준 값 자동 파생)
+    c.FONT_SIZE_CORRECTION_MODE = str(size_mode)
+    c.MODEL_FONT_SIZE_TOLERANCE = float(size_tol)
+    c.FONT_STYLE_FALLBACK_MODE = str(fallback_mode)
+    c.FONT_MODEL_TTA_MODE = str(tta_mode)
+    c.apply_font_modes()
     # 폰트 맵 업데이트
     font_dir = c.FONT_DIR
     font_selections = {
@@ -385,6 +392,31 @@ def build_ui() -> gr.Blocks:
                                            label="텍스트 최소 채움 비율",
                                            info="텍스트가 영역 면적의 이 비율 이하만 차지하면 폰트를 자동으로 키움")
 
+                    with gr.Accordion("폰트 모델 동작", open=False):
+                        s_size_mode = gr.Radio(
+                            choices=["off", "light", "strong"],
+                            value=c.FONT_SIZE_CORRECTION_MODE,
+                            label="폰트 크기 자동 보정",
+                            info="off=모델 예측 그대로 / light=글자 비율만 참고 / strong=비율+획 두께 모두 사용 (권장)",
+                        )
+                        s_size_tol = gr.Slider(
+                            0.05, 0.5, value=c.MODEL_FONT_SIZE_TOLERANCE, step=0.05,
+                            label="모델 크기 허용 오차 (±비율)",
+                            info="모델 예측 대비 ±몇 %까지 조절을 허용할지. 0.2 = 예측값의 80~120%",
+                        )
+                        s_fallback_mode = gr.Radio(
+                            choices=["off", "loose", "strict"],
+                            value=c.FONT_STYLE_FALLBACK_MODE,
+                            label="스타일 폴백",
+                            info="off=모델 예측 무조건 사용 / loose=아주 낮은 신뢰도일 때만 폴백 / strict=엄격 (권장)",
+                        )
+                        s_tta_mode = gr.Radio(
+                            choices=["off", "fast", "accurate"],
+                            value=c.FONT_MODEL_TTA_MODE,
+                            label="TTA (추론 정확도 향상)",
+                            info="off=단일 추론 / fast=2회 평균 / accurate=3회 평균 (권장, 약간 느림)",
+                        )
+
                     with gr.Accordion("폰트 매핑", open=False):
                         gr.Markdown("각 스타일에 사용할 폰트를 선택하세요.")
                         _font_files = _get_font_list()
@@ -417,6 +449,7 @@ def build_ui() -> gr.Blocks:
                             s_inpaint_ctx, s_inpaint_mask,
                             s_vert, s_vert_thresh, s_min_rot,
                             s_shrink, s_min_font, s_max_font, s_fill,
+                            s_size_mode, s_size_tol, s_fallback_mode, s_tta_mode,
                             s_font_selects["standard"], s_font_selects["shouting"], s_font_selects["cute"],
                             s_font_selects["narration"], s_font_selects["handwriting"], s_font_selects["pop"],
                             s_font_selects["angry"], s_font_selects["scared"], s_font_selects["embarrassment"],

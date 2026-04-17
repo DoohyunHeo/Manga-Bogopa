@@ -39,6 +39,33 @@ def run_pipeline_with_events(
         out_dir = output_folder or "data/outputs"
         os.makedirs(out_dir, exist_ok=True)
 
+        if getattr(config, "FONT_SIZE_CORRECTION_ENABLED", True):
+            yield ProgressEvent(
+                PipelinePhase.FONT_ANALYSIS,
+                0,
+                1,
+                "폰트 크기 보정: 활성화 "
+                f"(floor {config.MODEL_FONT_SIZE_FLOOR_RATIO:.2f}x, "
+                f"ceiling {config.MODEL_FONT_SIZE_CEILING_RATIO:.2f}x)",
+            )
+        else:
+            yield ProgressEvent(
+                PipelinePhase.FONT_ANALYSIS,
+                0,
+                1,
+                "폰트 크기 보정: 비활성화 (모델 예측 크기 그대로 사용)",
+            )
+
+        if getattr(config, "FONT_STYLE_FALLBACK_ENABLED", True):
+            yield ProgressEvent(
+                PipelinePhase.FONT_ANALYSIS,
+                0,
+                1,
+                "font style fallback: enabled "
+                f"(low-conf < {config.FONT_STYLE_LOW_CONFIDENCE_THRESHOLD:.2f}, "
+                f"margin < {config.FONT_STYLE_LOW_MARGIN_THRESHOLD:.2f} -> standard)",
+            )
+
         event_queue: queue.Queue[ProgressEvent] = queue.Queue()
 
         def on_progress(event: ProgressEvent):

@@ -34,6 +34,10 @@ class TextElement:
     font_style: str
     angle: int
     translated_text: Optional[str] = None
+    font_char_ratio: Optional[float] = None
+    font_stroke_ratio: Optional[float] = None
+    font_style_confidence: Optional[float] = None
+    expressive_confidence: Optional[float] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "TextElement":
@@ -44,6 +48,10 @@ class TextElement:
             font_style=d["font_style"],
             angle=d["angle"],
             translated_text=d.get("translated_text"),
+            font_char_ratio=d.get("font_char_ratio", d.get("font_stroke_ratio")),
+            font_stroke_ratio=d.get("font_stroke_ratio"),
+            font_style_confidence=d.get("font_style_confidence"),
+            expressive_confidence=d.get("expressive_confidence"),
         )
 
 

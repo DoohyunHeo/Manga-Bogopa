@@ -1,6 +1,6 @@
 import json
 import os
-from dataclasses import dataclass, field, fields, asdict
+from dataclasses import dataclass, field, fields
 from typing import Dict, Tuple
 
 import torch
@@ -25,6 +25,8 @@ class PipelineConfig:
     OUTPUT_DIR: str = "data/outputs"
     # ── 모델 경로 ──
     MODEL_PATH: str = "data/models/MangaTextExtractor-V2.pt"
+    FONT_APPEARANCE_MODEL_PATH: str = "data/models/font_appearance_analyzer.pth"
+    FONT_SIZE_MODEL_PATH: str = "data/models/font_size_regressor.pth"
     FONT_STYLE_MODEL_PATH: str = "data/models/font_style_analyzer.pth"
 
     # ── 디바이스 (런타임, JSON 제외) ──
@@ -37,8 +39,18 @@ class PipelineConfig:
     # ── 배치 크기 ──
     TRANSLATION_BATCH_SIZE: int = 50
     OCR_BATCH_SIZE: int = 16
+    OCR_NUM_BEAMS: int = 2
+    OCR_PREFER_LOCAL_FILES: bool = True
+    OCR_WARMUP_ON_LOAD: bool = False
     FONT_MODEL_BATCH_SIZE: int = 16
+    FONT_MODEL_TTA_ENABLED: bool = True
+    FONT_MODEL_TTA_VARIANTS: int = 3
     INPAINT_BATCH_SIZE: int = 8
+    PASS1_IMAGE_LOAD_WORKERS: int = 4
+    PASS1_EMPTY_CACHE_EVERY_N_BATCHES: int = 0
+    PASS2_MICROBATCH_SIZE: int = 4
+    PASS2_IMAGE_LOAD_WORKERS: int = 4
+    PASS2_EMPTY_CACHE_EVERY_N_BATCHES: int = 0
 
     # ── 말풍선 레이아웃 ──
     BUBBLE_EDGE_SAFE_MARGIN: int = 10
@@ -56,8 +68,52 @@ class PipelineConfig:
     VERTICAL_TOLERANCE_RATIO: float = 0.05
     MIN_ROTATION_ANGLE: int = 2
     FONT_SHRINK_THRESHOLD_RATIO: float = 0.75
-    MODEL_FONT_SIZE_FLOOR_RATIO: float = 0.9
+
+    # ── 폰트 크기 보정 모드 (고수준) ──
+    # "off"  : 모델 예측 그대로 사용 (테스트/디버깅용)
+    # "light": 글자 비율 가볍게 참고
+    # "strong": 글자 비율 + 획 두께 모두 사용 (실용 기본값)
+    FONT_SIZE_CORRECTION_MODE: str = "strong"
+    MODEL_FONT_SIZE_TOLERANCE: float = 0.2  # ±20% (대칭 허용 오차)
+
+    # ── 스타일 폴백 모드 (고수준) ──
+    # "off"   : 모델 예측 무조건 사용
+    # "loose" : 신뢰도가 매우 낮을 때만 폴백
+    # "strict": 엄격한 신뢰도 기준 (실용 기본값)
+    FONT_STYLE_FALLBACK_MODE: str = "strict"
+
+    # ── TTA 모드 (고수준) ──
+    # "off"      : TTA 비활성화
+    # "fast"     : 2회 변형 평균
+    # "accurate" : 3회 변형 평균 (실용 기본값)
+    FONT_MODEL_TTA_MODE: str = "accurate"
+
+    # ── 보정 모드에서 파생되는 저수준 값 (자동 계산, 직접 수정 X) ──
+    MODEL_FONT_SIZE_FLOOR_RATIO: float = 0.8
     MODEL_FONT_SIZE_CEILING_RATIO: float = 1.2
+    FONT_SIZE_CORRECTION_ENABLED: bool = False
+    FONT_CHAR_FIT_ENABLED: bool = True
+    FONT_CHAR_SCORE_WEIGHT: float = 42.0
+    FONT_CHAR_RATIO_TO_FONT_SIZE_GAIN: float = 1.18
+    FONT_STROKE_FIT_ENABLED: bool = True
+    FONT_STROKE_SCORE_WEIGHT: float = 42.0
+    FONT_STROKE_RATIO_TO_FONT_SIZE_GAIN: float = 7.5
+    FONT_STYLE_FALLBACK_ENABLED: bool = True
+    FONT_STYLE_LOW_CONFIDENCE_THRESHOLD: float = 0.24
+    FONT_STYLE_LOW_MARGIN_THRESHOLD: float = 0.04
+    FONT_STYLE_FALLBACK_MAX_ANGLE: int = 15
+    FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD: float = 0.55
+    FONT_STYLE_SPECIAL_MIN_CONFIDENCE: Dict[str, float] = field(default_factory=lambda: {
+        "standard": 0.0,
+        "pop": 0.46,
+        "shouting": 0.42,
+        "handwriting": 0.40,
+        "angry": 0.38,
+        "cute": 0.38,
+        "scared": 0.38,
+        "embarrassment": 0.36,
+        "narration": 0.34,
+    })
     MIN_READABLE_TEXT_SIZE: int = 16
     DEFAULT_TEXT_OVERSAMPLE: int = 2
     SMALL_TEXT_OVERSAMPLE: int = 3
@@ -104,6 +160,59 @@ class PipelineConfig:
     def __post_init__(self):
         if self.MIN_FONT_SIZE >= self.MAX_FONT_SIZE:
             raise ValueError(f"MIN_FONT_SIZE({self.MIN_FONT_SIZE}) must be < MAX_FONT_SIZE({self.MAX_FONT_SIZE})")
+        self.apply_font_modes()
+
+    def apply_font_modes(self):
+        """고수준 모드(FONT_SIZE_CORRECTION_MODE 등) → 저수준 값으로 파생."""
+        # 1) 폰트 크기 보정 모드
+        mode = str(self.FONT_SIZE_CORRECTION_MODE or "strong").lower()
+        if mode == "off":
+            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_CHAR_FIT_ENABLED = False
+            self.FONT_STROKE_FIT_ENABLED = False
+        elif mode == "light":
+            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_CHAR_FIT_ENABLED = True
+            self.FONT_STROKE_FIT_ENABLED = False
+            self.FONT_CHAR_SCORE_WEIGHT = 25.0
+        else:  # "strong"
+            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_CHAR_FIT_ENABLED = True
+            self.FONT_STROKE_FIT_ENABLED = True
+            self.FONT_CHAR_SCORE_WEIGHT = 42.0
+            self.FONT_STROKE_SCORE_WEIGHT = 42.0
+
+        # 2) 모델 크기 허용 오차 (대칭)
+        tol = max(0.05, min(0.5, float(self.MODEL_FONT_SIZE_TOLERANCE)))
+        self.MODEL_FONT_SIZE_FLOOR_RATIO = round(1.0 - tol, 3)
+        self.MODEL_FONT_SIZE_CEILING_RATIO = round(1.0 + tol, 3)
+
+        # 3) 스타일 폴백 모드
+        fb_mode = str(self.FONT_STYLE_FALLBACK_MODE or "strict").lower()
+        if fb_mode == "off":
+            self.FONT_STYLE_FALLBACK_ENABLED = False
+        elif fb_mode == "loose":
+            self.FONT_STYLE_FALLBACK_ENABLED = True
+            self.FONT_STYLE_LOW_CONFIDENCE_THRESHOLD = 0.15
+            self.FONT_STYLE_LOW_MARGIN_THRESHOLD = 0.02
+            self.FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD = 0.40
+        else:  # "strict"
+            self.FONT_STYLE_FALLBACK_ENABLED = True
+            self.FONT_STYLE_LOW_CONFIDENCE_THRESHOLD = 0.24
+            self.FONT_STYLE_LOW_MARGIN_THRESHOLD = 0.04
+            self.FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD = 0.55
+
+        # 4) TTA 모드
+        tta_mode = str(self.FONT_MODEL_TTA_MODE or "accurate").lower()
+        if tta_mode == "off":
+            self.FONT_MODEL_TTA_ENABLED = False
+            self.FONT_MODEL_TTA_VARIANTS = 1
+        elif tta_mode == "fast":
+            self.FONT_MODEL_TTA_ENABLED = True
+            self.FONT_MODEL_TTA_VARIANTS = 2
+        else:  # "accurate"
+            self.FONT_MODEL_TTA_ENABLED = True
+            self.FONT_MODEL_TTA_VARIANTS = 3
 
     # ── JSON 저장/로드 ──
 
@@ -136,6 +245,8 @@ class PipelineConfig:
                 if isinstance(current, tuple) and isinstance(val, list):
                     val = tuple(val)
                 setattr(self, f.name, val)
+        # 저수준 값이 JSON에 있더라도 고수준 모드 기준으로 다시 파생한다
+        self.apply_font_modes()
 
 
 def _load_config() -> PipelineConfig:

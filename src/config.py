@@ -64,6 +64,11 @@ class PipelineConfig:
     FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO: float = 0.7
     FREEFORM_ATTACHMENT_TEXT_MARGIN: int = 5
 
+    # ── 프리텍스트 스타일 처리 ──
+    # 프리텍스트는 만화 본문 밖의 나레이션/효과음 계열이라 "standard"가 사실상 나레이션으로 쓰임.
+    # 신뢰도가 이 값 미만이거나 standard로 판정되면 narration으로 치환.
+    FREEFORM_STYLE_MIN_CONFIDENCE: float = 0.70
+
     # ── 인페인팅 ──
     INPAINT_CONTEXT_PADDING: int = 50
     INPAINT_MASK_PADDING: int = 0

@@ -345,6 +345,27 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
     return all_props
 
 
+def _coerce_freeform_style(props, class_name):
+    """For free_text items, force narration when the style isn't a high-confidence non-standard pick.
+
+    Freeform text in manga is typically narration/SFX, so "standard" is treated
+    as the narration font; any weak prediction falls back to narration too.
+    """
+    if class_name != "free_text":
+        return props
+
+    min_confidence = float(getattr(config, "FREEFORM_STYLE_MIN_CONFIDENCE", 0.70))
+    confidence = props.get("font_style_confidence")
+    style = props.get("font_style") or "standard"
+    low_confidence = confidence is None or confidence < min_confidence
+
+    if style == "standard" or low_confidence:
+        adjusted = dict(props)
+        adjusted["font_style"] = "narration"
+        return adjusted
+    return props
+
+
 def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
     """Run OCR and font-property prediction for text boxes."""
     if not text_items:
@@ -373,10 +394,11 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
         if not _is_valid_text(ocr_text, item["box"]):
             filtered_count += 1
             continue
+        props = _coerce_freeform_style(all_props[i], item["class_name"])
         element = TextElement(
             text_box=item["box"].tolist(),
             original_text=ocr_text,
-            **all_props[i],
+            **props,
         )
         processed_text_elements.append({
             "element": element,

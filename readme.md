@@ -20,13 +20,17 @@ Manga-Bogopa/
 │   ├── models/         # AI 모델 파일 폴더
 │   └── fonts/          # 식자에 사용할 폰트 파일 폴더
 ├── src/
-│   ├── pipeline.py     # 전체 번역 및 식자 워크플로 관리
 │   ├── extractor.py    # 텍스트 영역 및 속성 추출
 │   ├── translator.py   # 텍스트 번역
 │   ├── inpainter.py    # 원본 텍스트 제거 (인페인팅)
-│   ├── drawer.py       # 번역된 텍스트 식자
+│   ├── pass1_stage.py  # 탐지/OCR/번역 단계 실행
+│   ├── pass2_stage.py  # 인페인팅/렌더링 단계 실행
+│   ├── page_drawer.py  # 페이지 단위 식자 오케스트레이션
+│   ├── text_layout.py  # 줄바꿈/폰트 피팅/배치 정책
+│   ├── text_renderer.py # 실제 텍스트 렌더링 엔진
 │   ├── config.py       # 프로젝트 주요 설정
 │   └── ...
+├── pipeline.py         # 전체 파이프라인 상위 오케스트레이션
 ├── main.py             # 프로젝트 실행 스크립트
 ├── requirements.txt    # 필요한 Python 라이브러리 목록
 └── readme.md           # 프로젝트 설명 파일

@@ -153,110 +153,133 @@ def _apply_font_map_entry(style, filename, font_dir):
 # 번역 처리
 # ---------------------------------------------------------------------------
 
+_PHASE_LABELS = {
+    PipelinePhase.LOADING_MODELS: "모델 로딩",
+    PipelinePhase.DETECTION:      "탐지",
+    PipelinePhase.OCR:            "글자 인식",
+    PipelinePhase.FONT_ANALYSIS:  "글씨체 분석",
+    PipelinePhase.TRANSLATION:    "번역",
+    PipelinePhase.PASS1_BATCH:    "배치 완료",
+    PipelinePhase.SAVING_JSON:    "데이터 저장",
+    PipelinePhase.PASS2_PAGE:     "식자",
+    PipelinePhase.COMPLETE:       "완료",
+}
+
+_LEVEL_PREFIX = {
+    "warning": "⚠️ ",
+    "error":   "❌ ",
+    "info":    "",
+}
+
+
+def _validate_run_inputs(input_folder: str):
+    """Return (cleaned_folder, error_message). error_message is None if valid."""
+    if not input_folder or not input_folder.strip():
+        return None, "입력 폴더 경로를 입력하세요."
+    cleaned = input_folder.strip()
+    if not os.path.isdir(cleaned):
+        return None, f"폴더를 찾을 수 없습니다: {cleaned}"
+    return cleaned, None
+
+
+def _apply_run_settings(input_folder, output_folder, yolo_threshold, batch_size, draw_debug):
+    """설정 저장 단일 진입점 — 번역 탭의 즉석 변경도 여기서만 반영."""
+    c = config._config
+    c.INPUT_DIR = input_folder
+    c.YOLO_CONF_THRESHOLD = float(yolo_threshold)
+    c.TRANSLATION_BATCH_SIZE = int(batch_size)
+    c.DRAW_DEBUG_BOXES = bool(draw_debug)
+    if output_folder and output_folder.strip():
+        c.OUTPUT_DIR = output_folder.strip()
+    config.save()
+
+
+def _format_event_line(event):
+    """ProgressEvent를 로그 한 줄로 변환. level에 따라 ⚠️/❌ 접두사."""
+    label = _PHASE_LABELS.get(event.phase, "")
+    prefix = _LEVEL_PREFIX.get(event.level, "")
+    if event.phase == PipelinePhase.PASS2_PAGE and event.total > 0:
+        pct = int(event.current / max(event.total, 1) * 100)
+        progress = f" {event.current}/{event.total} ({pct}%)"
+    elif event.phase == PipelinePhase.PASS1_BATCH:
+        progress = f" {event.current}/{event.total}"
+    else:
+        progress = ""
+    return f"{prefix}[{label}]{progress} {event.message}".rstrip()
+
+
+def _load_original_image(input_files: dict, page_name: str):
+    """Lazy load one page's original RGB. Returns None on failure."""
+    orig_path = input_files.get(page_name)
+    if not orig_path:
+        return None
+    orig_bgr = cv2.imread(orig_path)
+    if orig_bgr is None:
+        return None
+    return cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
+
+
+def _build_output_artifacts(output_dir: str):
+    """결과 폴더에서 JSON + ZIP 경로 생성."""
+    if not output_dir or not os.path.isdir(output_dir):
+        return None, None
+    json_path = None
+    candidate = os.path.join(output_dir, "translation_data.json")
+    if os.path.exists(candidate):
+        json_path = candidate
+
+    output_files = [
+        os.path.join(output_dir, f) for f in sorted(os.listdir(output_dir))
+        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
+    ]
+    zip_path = None
+    if output_files:
+        zip_path = os.path.join(tempfile.gettempdir(), "manga_bogopa_results.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for fp in output_files:
+                zf.write(fp, os.path.basename(fp))
+    return json_path, zip_path
+
+
 def _process_images(
     input_folder, output_folder,
     yolo_threshold, batch_size, draw_debug, enable_checkpoint,
 ):
-    if not input_folder or not input_folder.strip():
-        gr.Warning("입력 폴더 경로를 입력하세요.")
-        yield gr.update(), gr.update(), gr.update(), "입력 폴더 경로를 입력하세요."
+    cleaned_folder, error = _validate_run_inputs(input_folder)
+    if error:
+        gr.Warning(error)
+        yield gr.update(), gr.update(), gr.update(), error
         return
 
-    input_folder = input_folder.strip()
-    if not os.path.isdir(input_folder):
-        gr.Warning(f"폴더를 찾을 수 없습니다: {input_folder}")
-        yield gr.update(), gr.update(), gr.update(), f"폴더를 찾을 수 없습니다: {input_folder}"
-        return
+    _apply_run_settings(cleaned_folder, output_folder, yolo_threshold, batch_size, draw_debug)
+    resolved_output = output_folder.strip() if output_folder and output_folder.strip() else None
 
-    # 번역 옵션을 config에 저장
-    config._config.INPUT_DIR = input_folder
-    config._config.YOLO_CONF_THRESHOLD = yolo_threshold
-    config._config.TRANSLATION_BATCH_SIZE = int(batch_size)
-    config._config.DRAW_DEBUG_BOXES = draw_debug
-    if output_folder and output_folder.strip():
-        config._config.OUTPUT_DIR = output_folder.strip()
-    config.save()
+    input_files = {
+        os.path.basename(os.path.join(cleaned_folder, f)): os.path.join(cleaned_folder, f)
+        for f in os.listdir(cleaned_folder)
+    }
 
-    output_folder = output_folder.strip() if output_folder and output_folder.strip() else None
-    pairs = []         # (원본rgb, 번역rgb, page_name) 쌍 누적
+    pairs = []          # (orig_rgb, trans_rgb, page_name) — 실시간 갤러리용
     output_dir = None
     log_lines = []
 
-    # 원본 이미지 로드용 경로 맵
-    input_files = {
-        os.path.basename(os.path.join(input_folder, f)): os.path.join(input_folder, f)
-        for f in os.listdir(input_folder)
-    }
-
-    for event in run_pipeline_with_events(
-        input_folder, output_folder,
-        yolo_threshold, int(batch_size), draw_debug, enable_checkpoint,
-    ):
-        phase_labels = {
-            PipelinePhase.LOADING_MODELS: "모델 로딩",
-            PipelinePhase.DETECTION:      "탐지",
-            PipelinePhase.OCR:            "OCR + 폰트분석",
-            PipelinePhase.FONT_ANALYSIS:  "폰트분석",
-            PipelinePhase.TRANSLATION:    "번역",
-            PipelinePhase.PASS1_BATCH:    "배치 완료",
-            PipelinePhase.SAVING_JSON:    "데이터 저장",
-            PipelinePhase.PASS2_PAGE:     "인페인팅 + 식자",
-            PipelinePhase.COMPLETE:       "완료",
-        }
-        label = phase_labels.get(event.phase, "")
-        pct = event.current / max(event.total, 1)
-
-        line = ""
-        if event.phase == PipelinePhase.LOADING_MODELS:
-            line = f"[{label}] {event.message}"
-        elif event.phase in (PipelinePhase.DETECTION, PipelinePhase.OCR,
-                              PipelinePhase.FONT_ANALYSIS, PipelinePhase.TRANSLATION):
-            line = f"[{label}] {event.message}"
-        elif event.phase == PipelinePhase.PASS1_BATCH:
-            line = f"[{label}] 배치 {event.current}/{event.total} — {event.message}"
-        elif event.phase == PipelinePhase.SAVING_JSON:
-            line = f"[{label}] {event.message}"
-        elif event.phase == PipelinePhase.PASS2_PAGE:
-            pct = int(event.current / max(event.total, 1) * 100)
-            line = f"[{label}] {event.current}/{event.total} ({pct}%) — {event.message}"
-            if event.image_rgb is not None:
-                page_name = event.page_name or f"Page {event.current}"
-                trans_rgb = event.image_rgb.copy()
-                orig_rgb = None
-                orig_path = input_files.get(page_name)
-                if orig_path:
-                    orig_bgr = cv2.imread(orig_path)
-                    if orig_bgr is not None:
-                        orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
-                pairs.append((orig_rgb, trans_rgb, page_name))
-        elif event.phase == PipelinePhase.COMPLETE:
-            if event.page_name and os.path.isdir(event.page_name):
-                output_dir = event.page_name
-            line = f"[{label}] {event.message}"
-
+    for event in run_pipeline_with_events(resolved_output, enable_checkpoint):
+        line = _format_event_line(event)
         if line:
             log_lines.append(line)
 
-        # 진행 중에는 로그만 업데이트, 이미지는 완료 후 한번에
+        if event.phase == PipelinePhase.PASS2_PAGE and event.image_rgb is not None:
+            page_name = event.page_name or f"Page {event.current}"
+            orig_rgb = _load_original_image(input_files, page_name)
+            pairs.append((orig_rgb, event.image_rgb.copy(), page_name))
+
+        if event.phase == PipelinePhase.COMPLETE and event.page_name and os.path.isdir(event.page_name):
+            output_dir = event.page_name
+
         yield (gr.update(), gr.update(), gr.update(), "\n".join(log_lines))
 
-    json_path = None
-    zip_path = None
-    if output_dir:
-        candidate = os.path.join(output_dir, "translation_data.json")
-        if os.path.exists(candidate):
-            json_path = candidate
-        output_files = [
-            os.path.join(output_dir, f) for f in sorted(os.listdir(output_dir))
-            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))
-        ]
-        if output_files:
-            zip_path = os.path.join(tempfile.gettempdir(), "manga_bogopa_results.zip")
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                for fp in output_files:
-                    zf.write(fp, os.path.basename(fp))
+    json_path, zip_path = _build_output_artifacts(output_dir)
 
-    # 완료 후 이미지 한번에 표시 — 원본/번역 교차 배치 (columns=2로 좌우 정렬)
     gallery_images = []
     for orig_rgb, trans_rgb, name in pairs:
         if orig_rgb is not None:

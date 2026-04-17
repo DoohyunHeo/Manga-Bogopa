@@ -259,7 +259,7 @@ def _process_images(
         for f in os.listdir(cleaned_folder)
     }
 
-    pairs = []          # (orig_rgb, trans_rgb, page_name) — 실시간 갤러리용
+    gallery_images = []   # 스트리밍용 — 완료된 페이지를 순차 추가
     output_dir = None
     log_lines = []
 
@@ -268,23 +268,21 @@ def _process_images(
         if line:
             log_lines.append(line)
 
+        gallery_update = gr.update()
         if event.phase == PipelinePhase.PASS2_PAGE and event.image_rgb is not None:
             page_name = event.page_name or f"Page {event.current}"
             orig_rgb = _load_original_image(input_files, page_name)
-            pairs.append((orig_rgb, event.image_rgb.copy(), page_name))
+            if orig_rgb is not None:
+                gallery_images.append((orig_rgb, f"원본 — {page_name}"))
+            gallery_images.append((event.image_rgb.copy(), f"번역 — {page_name}"))
+            gallery_update = list(gallery_images)
 
         if event.phase == PipelinePhase.COMPLETE and event.page_name and os.path.isdir(event.page_name):
             output_dir = event.page_name
 
-        yield (gr.update(), gr.update(), gr.update(), "\n".join(log_lines))
+        yield (gallery_update, gr.update(), gr.update(), "\n".join(log_lines))
 
     json_path, zip_path = _build_output_artifacts(output_dir)
-
-    gallery_images = []
-    for orig_rgb, trans_rgb, name in pairs:
-        if orig_rgb is not None:
-            gallery_images.append((orig_rgb, f"원본 — {name}"))
-        gallery_images.append((trans_rgb, f"번역 — {name}"))
 
     yield (
         gallery_images if gallery_images else gr.update(),

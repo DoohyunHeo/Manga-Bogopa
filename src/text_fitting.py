@@ -17,7 +17,12 @@ import re
 import numpy as np
 
 from src import config
-from src.text_renderer import measure_character_body_height_ratio, measure_line, measure_text
+from src.text_renderer import (
+    measure_character_body_height_ratio,
+    measure_line,
+    measure_text,
+    measure_vertical_text,
+)
 from src.text_wrapping import (
     LINE_HEAD_FORBIDDEN,
     LINE_TAIL_FORBIDDEN,
@@ -374,28 +379,22 @@ def find_best_fit_font_vertical(
 ):
     if not is_font_size_correction_enabled() and char_ratio_target is None:
         fixed_size = max(1, int(round(initial_font_size)))
-        text = text.replace("â‹¯", "ï¸™")
-        tokens = re.findall(r'[!?]+|.', text)
-        vertical_text = "\n".join(tokens)
         logger.debug(
             f"[font-fit-raw-vertical] text='{text[:20]}...' target=({target_width:.0f}x{target_height:.0f}) "
             f"fixed={fixed_size}"
         )
-        return vertical_text, fixed_size
+        return text, fixed_size
 
     max_allowed_size = _get_model_font_upper_bound(initial_font_size)
     min_allowed_size = max(
         config.MIN_FONT_SIZE,
         min(max_allowed_size, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
     )
-    text = text.replace("â‹¯", "ï¸™")
-    tokens = re.findall(r'[!?]+|.', text)
-    vertical_text = "\n".join(tokens)
 
     best_candidate = None
 
     for current_size in range(max_allowed_size, config.MIN_FONT_SIZE - 1, -1):
-        text_w, text_h = measure_text(vertical_text, font_path, current_size, style)
+        text_w, text_h = measure_vertical_text(text, font_path, current_size, style)
         if text_h > target_height or text_w > target_width:
             continue
 
@@ -413,7 +412,7 @@ def find_best_fit_font_vertical(
                 else target_height
             )
             measured_char_ratio = measure_character_body_height_ratio(
-                vertical_text,
+                text,
                 font_path,
                 current_size,
                 style,
@@ -426,6 +425,6 @@ def find_best_fit_font_vertical(
             best_candidate = (score, current_size)
 
     if best_candidate is not None:
-        return vertical_text, best_candidate[1]
+        return text, best_candidate[1]
 
-    return vertical_text, max(config.MIN_FONT_SIZE, min(initial_font_size, max_allowed_size))
+    return text, max(config.MIN_FONT_SIZE, min(initial_font_size, max_allowed_size))

@@ -11,6 +11,7 @@ Adobe Photoshop과 동일한 HarfBuzz 텍스트 엔진 기반.
 """
 import functools
 import logging
+import re
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -20,6 +21,19 @@ import skia
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# In vertical text, these characters are drawn rotated 90° clockwise so they
+# read along the vertical flow. Multi-char tokens (e.g. "!?") are NOT rotated.
+VERTICAL_ROTATE_CHARS = frozenset({
+    # Dashes and wave marks
+    '~', '〜', '-', '—', '─', 'ー', '−', '–',
+    # Parentheses and brackets (halfwidth + fullwidth + CJK)
+    '(', ')', '[', ']', '{', '}',
+    '(', ')', '〈', '〉', '《', '》',
+    '「', '」', '『', '』', '【', '】', '〔', '〕',
+    # Ellipsis (horizontal three dots → vertical three dots after rotation)
+    '⋯', '…',
+})
 
 
 @dataclass
@@ -456,6 +470,96 @@ def render_text_on_image(
     # 바운딩 박스 반환
     bbox = (int(start_x), int(start_y), int(start_x + text_width), int(start_y + text_height))
     return bbox
+
+
+def _tokenize_vertical_text(text: str) -> list:
+    """Split text into vertical-stack slots.
+
+    Consecutive ! and ? merge into one slot so "!?" displays horizontally in a
+    single vertical slot (manga convention). Every other char is its own slot.
+    """
+    if not text:
+        return []
+    return re.findall(r'[!?]+|.', text, flags=re.DOTALL)
+
+
+def _should_rotate_token(token: str) -> bool:
+    return len(token) == 1 and token in VERTICAL_ROTATE_CHARS
+
+
+def measure_vertical_text(text: str, font_path: str, font_size: int, style: TextStyle = None) -> Tuple[float, float]:
+    """Return (max_slot_width, total_stack_height) for a vertical char stack.
+
+    Chars in VERTICAL_ROTATE_CHARS are measured with swapped w/h since they
+    render rotated 90°.
+    """
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+    tokens = _tokenize_vertical_text(text)
+    max_w = 0.0
+    total_h = 0.0
+    for token in tokens:
+        w, h = measure_text(token, font_path, font_size, style)
+        if _should_rotate_token(token):
+            max_w = max(max_w, h)
+            total_h += w
+        else:
+            max_w = max(max_w, w)
+            total_h += h
+    return max_w, total_h
+
+
+def render_vertical_text_on_image(
+    img_pil: Image.Image,
+    text: str,
+    center_x: float,
+    center_y: float,
+    font_path: str,
+    font_size: int,
+    style: TextStyle = None,
+) -> Tuple[int, int, int, int]:
+    """Draw text as a vertical stack, rotating rotation-candidate chars 90° CW.
+
+    Stack is centered on (center_x, center_y). Returns the bounding box.
+    """
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+
+    tokens = _tokenize_vertical_text(text)
+    if not tokens:
+        cx, cy = int(center_x), int(center_y)
+        return (cx, cy, cx, cy)
+
+    slot_sizes = []
+    total_h = 0.0
+    max_w = 0.0
+    for token in tokens:
+        w, h = measure_text(token, font_path, font_size, style)
+        rotate = _should_rotate_token(token)
+        if rotate:
+            slot_w, slot_h = h, w
+        else:
+            slot_w, slot_h = w, h
+        slot_sizes.append((slot_w, slot_h, rotate))
+        total_h += slot_h
+        max_w = max(max_w, slot_w)
+
+    start_y = center_y - total_h / 2.0
+    cur_y = start_y
+    for token, (slot_w, slot_h, rotate) in zip(tokens, slot_sizes):
+        layer, _, _, _ = _render_text_layer(token, font_path, font_size, style, align="center")
+        if rotate:
+            layer = layer.rotate(-90, expand=True, resample=Image.Resampling.BICUBIC)
+        paste_x = int(round(center_x - layer.width / 2))
+        paste_y = int(round(cur_y + slot_h / 2 - layer.height / 2))
+        img_pil.paste(layer, (paste_x, paste_y), layer)
+        cur_y += slot_h
+
+    x1 = int(round(center_x - max_w / 2))
+    y1 = int(round(start_y))
+    x2 = int(round(center_x + max_w / 2))
+    y2 = int(round(start_y + total_h))
+    return (x1, y1, x2, y2)
 
 
 def render_rotated_text_on_image(

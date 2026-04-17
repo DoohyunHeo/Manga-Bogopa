@@ -12,7 +12,12 @@ from src.text_layout import (
     resolve_bubble_style,
     resolve_freeform_style,
 )
-from src.text_renderer import render_text_on_image, render_rotated_text_on_image, replace_unsupported_chars
+from src.text_renderer import (
+    render_rotated_text_on_image,
+    render_text_on_image,
+    render_vertical_text_on_image,
+    replace_unsupported_chars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +41,13 @@ def _get_alignment_for_bubble(attachment, text_box, bubble_box):
 
 
 def _render_text(img_pil, wrapped_text, font_path, font_size, center_x, center_y, angle, style,
-                 align='center', anchor='mm'):
+                 align='center', anchor='mm', vertical=False):
     """Render text and return the resulting bounding box."""
+    if vertical:
+        return render_vertical_text_on_image(
+            img_pil, wrapped_text, center_x, center_y,
+            font_path, font_size, style,
+        )
     if abs(angle) > config.MIN_ROTATION_ANGLE:
         return render_rotated_text_on_image(
             img_pil, wrapped_text, center_x, center_y, angle,
@@ -62,6 +72,7 @@ def _render_planned_text(img_pil, plan: TextRenderPlan):
         plan.style,
         plan.align,
         plan.anchor,
+        plan.vertical,
     )
 
 

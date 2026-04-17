@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 
 from src import config
-from src.data_models import PageData
+from src.data_models import Attachment, PageData
 from src.text_layout import (
     TextRenderPlan,
     plan_bubble_text,
@@ -23,10 +23,10 @@ def _get_alignment_for_bubble(attachment, text_box, bubble_box):
     bubble_x1, _, bubble_x2, _ = bubble_box
     center_y = (text_y1 + text_y2) // 2
 
-    if attachment == 'left':
+    if attachment == Attachment.LEFT:
         align, anchor = 'left', 'lm'
         center_x = max(text_x1 - config.ATTACHED_BUBBLE_TEXT_MARGIN, bubble_x1 + config.BUBBLE_EDGE_SAFE_MARGIN)
-    elif attachment == 'right':
+    elif attachment == Attachment.RIGHT:
         align, anchor = 'right', 'rm'
         center_x = min(text_x2 + config.ATTACHED_BUBBLE_TEXT_MARGIN, bubble_x2 - config.BUBBLE_EDGE_SAFE_MARGIN)
     else:

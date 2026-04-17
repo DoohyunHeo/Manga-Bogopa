@@ -38,6 +38,7 @@ class TextElement:
     font_stroke_ratio: Optional[float] = None
     font_style_confidence: Optional[float] = None
     expressive_confidence: Optional[float] = None
+    attachment: Attachment = Attachment.NONE
 
     @classmethod
     def from_dict(cls, d: dict) -> "TextElement":
@@ -52,6 +53,7 @@ class TextElement:
             font_stroke_ratio=d.get("font_stroke_ratio"),
             font_style_confidence=d.get("font_style_confidence"),
             expressive_confidence=d.get("expressive_confidence"),
+            attachment=Attachment(d.get("attachment", Attachment.NONE.value)),
         )
 
 

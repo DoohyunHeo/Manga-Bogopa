@@ -7,6 +7,7 @@ from typing import Optional
 import numpy as np
 
 from src import config
+from src.data_models import Attachment
 from src.text_renderer import (
     DEFAULT_STYLES,
     FREEFORM_STYLE,
@@ -226,14 +227,23 @@ def resolve_freeform_style(element, box_width, box_height):
     return style
 
 
-def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects, img_size=None):
-    adj_x, adj_y = center_x, center_y
-    w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
+def _adjust_freeform_position(freeform_bbox, anchor_x, anchor_y, bubble_text_rects, img_size=None):
+    """Nudge a freeform text to avoid overlap with bubble texts.
+
+    `freeform_bbox` is the initial bounding box produced by the anchor-aware
+    layout; the function preserves the anchor→bbox offset while moving the
+    anchor, so left/right-aligned texts keep their alignment after adjustment.
+    """
+    adj_x, adj_y = anchor_x, anchor_y
+    dx = freeform_bbox[0] - anchor_x
+    dy = freeform_bbox[1] - anchor_y
+    w = freeform_bbox[2] - freeform_bbox[0]
+    h = freeform_bbox[3] - freeform_bbox[1]
 
     for _ in range(3):
         moved = False
         for bubble_text_rect in bubble_text_rects:
-            current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
+            current_bbox = (adj_x + dx, adj_y + dy, adj_x + dx + w, adj_y + dy + h)
             if rects_intersect(current_bbox, bubble_text_rect):
                 moves = {
                     'up': current_bbox[3] - bubble_text_rect[1],
@@ -256,8 +266,8 @@ def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rec
 
     if img_size:
         img_w, img_h = img_size
-        adj_x = max(w / 2, min(adj_x, img_w - w / 2))
-        adj_y = max(h / 2, min(adj_y, img_h - h / 2))
+        adj_x = max(-dx, min(adj_x, img_w - dx - w))
+        adj_y = max(-dy, min(adj_y, img_h - dy - h))
 
     return adj_x, adj_y
 
@@ -805,20 +815,34 @@ def plan_freeform_text(element, bubble_text_rects, img_size, font_path, style):
     target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
     wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
 
-    center_x = (element.text_box[0] + element.text_box[2]) / 2
     text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
+    x1, y1, x2, y2 = element.text_box
     if vertical:
-        center_y = (element.text_box[1] + element.text_box[3]) / 2
+        center_y = (y1 + y2) / 2
     else:
-        center_y = element.text_box[1] + text_h / 2
-    initial_bbox = (
-        center_x - text_w / 2,
-        center_y - text_h / 2,
-        center_x + text_w / 2,
-        center_y + text_h / 2,
-    )
+        center_y = y1 + text_h / 2
 
-    adj_x, adj_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects, img_size)
+    attachment = getattr(element, "attachment", Attachment.NONE)
+    # Vertical layout keeps its own geometry; horizontal layout honors attachment.
+    if vertical or attachment == Attachment.NONE:
+        align, anchor = "center", "mm"
+        anchor_x = (x1 + x2) / 2
+        initial_bbox = (
+            anchor_x - text_w / 2,
+            center_y - text_h / 2,
+            anchor_x + text_w / 2,
+            center_y + text_h / 2,
+        )
+    elif attachment == Attachment.LEFT:
+        align, anchor = "left", "lm"
+        anchor_x = x1 - config.FREEFORM_ATTACHMENT_TEXT_MARGIN
+        initial_bbox = (anchor_x, center_y - text_h / 2, anchor_x + text_w, center_y + text_h / 2)
+    else:  # Attachment.RIGHT
+        align, anchor = "right", "rm"
+        anchor_x = x2 + config.FREEFORM_ATTACHMENT_TEXT_MARGIN
+        initial_bbox = (anchor_x - text_w, center_y - text_h / 2, anchor_x, center_y + text_h / 2)
+
+    adj_x, adj_y = _adjust_freeform_position(initial_bbox, anchor_x, center_y, bubble_text_rects, img_size)
 
     return TextRenderPlan(
         text=wrapped_text,
@@ -828,8 +852,8 @@ def plan_freeform_text(element, bubble_text_rects, img_size, font_path, style):
         center_x=adj_x,
         center_y=adj_y,
         angle=element.angle if not vertical else 0,
-        align="center",
-        anchor="mm",
+        align=align,
+        anchor=anchor,
         vertical=vertical,
         initial_bbox=initial_bbox,
     )

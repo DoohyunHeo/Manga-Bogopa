@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from src import config
 from src.data_models import Attachment, PageData, SpeechBubble, TextElement
+from src.line_detector import detect_bubble_attachment, detect_freeform_attachment
 from src.utils import Letterbox, calculate_iou, is_box_inside, merge_boxes
 
 logger = logging.getLogger(__name__)
@@ -21,61 +22,6 @@ def _cuda_autocast_context():
     if config.DEVICE != "cuda":
         return nullcontext()
     return torch.autocast(device_type="cuda", dtype=torch.float16)
-
-
-def check_bubble_attachment(cropped_bubble_image_rgb):
-    """Detect whether a speech bubble is attached on the left or right edge."""
-    try:
-        img = cropped_bubble_image_rgb
-        img_h, img_w = img.shape[:2]
-        scan_width = int(img_w * 0.10)
-        if scan_width == 0:
-            return Attachment.NONE
-
-        left_crop = img[:, :scan_width]
-        right_crop = img[:, -scan_width:]
-        threshold = config.BUBBLE_ATTACHMENT_THRESHOLD
-
-        gray_left = cv2.cvtColor(left_crop, cv2.COLOR_RGB2GRAY)
-        edges_left = cv2.Canny(gray_left, 50, 150)
-        lines_left = cv2.HoughLinesP(
-            edges_left,
-            1,
-            np.pi / 180,
-            threshold=10,
-            minLineLength=img_h * 0.8,
-            maxLineGap=10,
-        )
-        has_left_vertical_line = (
-            any(abs(l[0] - l[2]) < threshold and l[0] < threshold for l in lines_left[0])
-            if lines_left is not None
-            else False
-        )
-
-        gray_right = cv2.cvtColor(right_crop, cv2.COLOR_RGB2GRAY)
-        edges_right = cv2.Canny(gray_right, 50, 150)
-        lines_right = cv2.HoughLinesP(
-            edges_right,
-            1,
-            np.pi / 180,
-            threshold=10,
-            minLineLength=img_h * 0.8,
-            maxLineGap=10,
-        )
-        has_right_vertical_line = (
-            any(abs(l[0] - l[2]) < threshold and l[0] > scan_width - threshold for l in lines_right[0])
-            if lines_right is not None
-            else False
-        )
-
-        if has_right_vertical_line and not has_left_vertical_line:
-            return Attachment.RIGHT
-        if has_left_vertical_line and not has_right_vertical_line:
-            return Attachment.LEFT
-        return Attachment.NONE
-    except Exception as e:
-        logger.warning(f"Bubble attachment detection failed: {e}")
-        return Attachment.NONE
 
 
 def detect_objects(detection_model, batch_images_rgb):
@@ -527,7 +473,11 @@ def structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, proc
             if matched_element:
                 b = bubble_box
                 cropped_bubble_rgb = page_data.image_rgb[b[1]:b[3], b[0]:b[2]]
-                attachment = check_bubble_attachment(cropped_bubble_rgb)
+                attachment = detect_bubble_attachment(
+                    cropped_bubble_rgb,
+                    edge_ratio=config.BUBBLE_ATTACHMENT_EDGE_RATIO,
+                    min_length_ratio=config.BUBBLE_ATTACHMENT_MIN_LENGTH_RATIO,
+                )
                 speech_bubble = SpeechBubble(
                     bubble_box=b.tolist(),
                     text_element=matched_element,
@@ -535,7 +485,15 @@ def structure_page_data(batch_paths, batch_images_rgb, all_bubbles_by_page, proc
                 )
                 page_data.speech_bubbles.append(speech_bubble)
 
-        page_data.freeform_texts = [page_free_texts[i] for i in sorted(list(unmatched_free_text_indices))]
+        remaining_free_texts = [page_free_texts[i] for i in sorted(list(unmatched_free_text_indices))]
+        for free_text in remaining_free_texts:
+            free_text.attachment = detect_freeform_attachment(
+                page_data.image_rgb,
+                free_text.text_box,
+                search_px=config.FREEFORM_ATTACHMENT_SEARCH_PX,
+                min_length_ratio=config.FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO,
+            )
+        page_data.freeform_texts = remaining_free_texts
         batch_page_data.append(page_data)
 
     return batch_page_data

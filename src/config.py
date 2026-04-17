@@ -55,8 +55,14 @@ class PipelineConfig:
     # ── 말풍선 레이아웃 ──
     BUBBLE_EDGE_SAFE_MARGIN: int = 10
     BUBBLE_PADDING_RATIO: float = 0.15
-    BUBBLE_ATTACHMENT_THRESHOLD: int = 5
     ATTACHED_BUBBLE_TEXT_MARGIN: int = 5
+
+    # ── 패널 테두리 붙음 감지 ──
+    BUBBLE_ATTACHMENT_EDGE_RATIO: float = 0.10
+    BUBBLE_ATTACHMENT_MIN_LENGTH_RATIO: float = 0.8
+    FREEFORM_ATTACHMENT_SEARCH_PX: int = 100
+    FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO: float = 0.7
+    FREEFORM_ATTACHMENT_TEXT_MARGIN: int = 5
 
     # ── 인페인팅 ──
     INPAINT_CONTEXT_PADDING: int = 50

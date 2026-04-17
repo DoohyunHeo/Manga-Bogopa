@@ -129,7 +129,7 @@ def erase_patches_in_batch(lama_model, patch_mask_list, target_size=512):
         img_batch = torch.stack(img_tensors).to(lama_model.device)
         mask_batch = torch.stack(mask_tensors).to(lama_model.device)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             inpainted_batch = lama_model.model(img_batch, mask_batch)
 
         output_patches_mini_batch = []

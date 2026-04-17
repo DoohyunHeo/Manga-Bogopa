@@ -611,17 +611,12 @@ def _find_best_fit_font(
             char_ratio_reference_height=char_ratio_reference_height,
         )
 
-    if char_ratio_target is not None:
-        max_allowed_size = config.MAX_FONT_SIZE
-        start_size = _get_font_search_start(initial_font_size, target_height)
-        preferred_minimum_size = config.MIN_FONT_SIZE
-    else:
-        max_allowed_size = _get_model_font_upper_bound(initial_font_size)
-        start_size = min(_get_font_search_start(initial_font_size, target_height), max_allowed_size)
-        preferred_minimum_size = max(
-            config.MIN_FONT_SIZE,
-            min(config.MAX_FONT_SIZE, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
-        )
+    max_allowed_size = _get_model_font_upper_bound(initial_font_size)
+    start_size = min(_get_font_search_start(initial_font_size, target_height), max_allowed_size)
+    preferred_minimum_size = max(
+        config.MIN_FONT_SIZE,
+        min(config.MAX_FONT_SIZE, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
+    )
     bubble_ratio = target_height / max(target_width, 1)
     width_ratios = [1.0, 0.9]
     if bubble_ratio <= 0.9:
@@ -701,7 +696,11 @@ def _find_best_fit_font_vertical(
         )
         return vertical_text, fixed_size
 
-    max_allowed_size = config.MAX_FONT_SIZE if char_ratio_target is not None else _get_model_font_upper_bound(initial_font_size)
+    max_allowed_size = _get_model_font_upper_bound(initial_font_size)
+    min_allowed_size = max(
+        config.MIN_FONT_SIZE,
+        min(max_allowed_size, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
+    )
     text = text.replace("â‹¯", "ï¸™")
     tokens = re.findall(r'[!?]+|.', text)
     vertical_text = "\n".join(tokens)
@@ -717,6 +716,8 @@ def _find_best_fit_font_vertical(
         fill_ratio = (text_w * text_h) / max(target_width * target_height, 1.0)
         if fill_ratio < config.FONT_AREA_FILL_RATIO:
             score -= (config.FONT_AREA_FILL_RATIO - fill_ratio) * 18.0
+        if current_size < min_allowed_size:
+            score -= (min_allowed_size - current_size) * 12.0
 
         if char_ratio_target is not None:
             reference_height = (

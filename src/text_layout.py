@@ -1,38 +1,52 @@
 import logging
 import math
 import re
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
-from PIL import Image
 
 from src import config
-from src.data_models import PageData
 from src.text_renderer import (
-    DEFAULT_STYLES, FREEFORM_STYLE,
-    measure_line, measure_text, render_text_on_image, render_rotated_text_on_image,
-    replace_unsupported_chars,
+    DEFAULT_STYLES,
+    FREEFORM_STYLE,
+    TextStyle,
+    measure_character_body_height_ratio,
+    measure_line,
+    measure_text,
 )
 from src.utils import rects_intersect
 
 logger = logging.getLogger(__name__)
 
-LINE_HEAD_FORBIDDEN = set(")]}〉》」』】、。，！？…⋯:;")
-LINE_TAIL_FORBIDDEN = set("([<{〈《「『【")
+LINE_HEAD_FORBIDDEN = set(")]}ã€‰ã€‹ã€ã€ã€‘ã€ã€‚ï¼Œï¼ï¼Ÿâ€¦â‹¯:;")
+LINE_TAIL_FORBIDDEN = set("([<{ã€ˆã€Šã€Œã€Žã€")
+
+
+@dataclass(frozen=True)
+class TextRenderPlan:
+    text: str
+    font_path: str
+    font_size: int
+    style: TextStyle
+    center_x: float
+    center_y: float
+    angle: float = 0.0
+    align: str = "center"
+    anchor: str = "mm"
+    vertical: bool = False
+    initial_bbox: Optional[tuple] = None
 
 
 def _text_density(text: str) -> int:
-    """줄바꿈/공백을 제외한 문자 수를 반환합니다."""
     return len(re.sub(r"\s+", "", text or ""))
 
 
 def _visible_len(text: str) -> int:
-    """공백을 제외한 가시 문자 수를 반환합니다."""
     return len(re.sub(r"\s+", "", text or ""))
 
 
 def _wrap_text_korean(text, font_path, font_size, style, max_width):
-    """한국어 말풍선에 맞춘 줄 바꿈 함수입니다."""
     lines = []
     for paragraph in text.split('\n'):
         words = paragraph.split()
@@ -59,7 +73,6 @@ def _wrap_text_korean(text, font_path, font_size, style, max_width):
 
 
 def _line_layout_penalty(line_text, line_width, max_width, target_ratio, is_last_line):
-    """한 줄의 폭 활용도와 금지 행두/행말을 기준으로 패널티를 계산합니다."""
     stripped = line_text.strip()
     if not stripped:
         return 100.0
@@ -84,7 +97,6 @@ def _line_layout_penalty(line_text, line_width, max_width, target_ratio, is_last
 
 
 def _wrap_text_balanced(text, font_path, font_size, style, max_width, target_lines):
-    """넓은 말풍선에서 의도적인 개행으로 더 큰 폰트를 쓰기 위한 balanced wrap."""
     wrapped_paragraphs = []
 
     for paragraph in text.split('\n'):
@@ -157,7 +169,6 @@ def _wrap_text_balanced(text, font_path, font_size, style, max_width, target_lin
 
 
 def _make_balanced_wrap(target_lines):
-    """고정 줄 수 balanced wrap 함수를 생성합니다."""
     def _wrap(text, font_path, font_size, style, max_width):
         return _wrap_text_balanced(text, font_path, font_size, style, max_width, target_lines)
 
@@ -165,8 +176,7 @@ def _make_balanced_wrap(target_lines):
     return _wrap
 
 
-def _resolve_bubble_style(element, bubble_box, target_width, target_height):
-    """커뮤니티 식질 규칙을 반영해 말풍선용 스타일을 보정합니다."""
+def resolve_bubble_style(element, bubble_box, target_width, target_height):
     base_style = DEFAULT_STYLES.get(element.font_style, DEFAULT_STYLES["standard"])
     bubble_width = max(1, bubble_box[2] - bubble_box[0])
     bubble_height = max(1, bubble_box[3] - bubble_box[1])
@@ -180,14 +190,12 @@ def _resolve_bubble_style(element, bubble_box, target_width, target_height):
     embolden = style.embolden
     oversample = style.oversample_scale
 
-    # 세로로 긴 말풍선은 한국어를 세로쓰기하지 않고, 장평과 줄 밀도로 세로형 인상을 만듭니다.
     if bubble_ratio >= config.TALL_BUBBLE_RATIO and density >= config.TALL_BUBBLE_MIN_CHARS:
         target_scale = min(target_scale, 0.90)
         target_letter_spacing = min(target_letter_spacing, -0.8)
         target_line_spacing = max(target_line_spacing, 1.22)
         oversample = max(oversample, config.DEFAULT_TEXT_OVERSAMPLE)
 
-    # 작은 말풍선은 과도한 압축보다 판독성을 우선합니다.
     if min(target_width, target_height) <= 70 or element.font_size <= config.MIN_READABLE_TEXT_SIZE:
         target_scale = max(target_scale, 0.92)
         target_letter_spacing = max(target_letter_spacing, -0.25)
@@ -205,8 +213,7 @@ def _resolve_bubble_style(element, bubble_box, target_width, target_height):
     )
 
 
-def _resolve_freeform_style(element, box_width, box_height):
-    """말풍선 밖 텍스트는 stroke를 유지하되, 작은 글씨일수록 더 선명하게 그립니다."""
+def resolve_freeform_style(element, box_width, box_height):
     style = FREEFORM_STYLE
     if min(box_width, box_height) <= 60 or element.font_size <= config.MIN_READABLE_TEXT_SIZE:
         return replace(
@@ -219,16 +226,51 @@ def _resolve_freeform_style(element, box_width, box_height):
     return style
 
 
+def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects, img_size=None):
+    adj_x, adj_y = center_x, center_y
+    w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
+
+    for _ in range(3):
+        moved = False
+        for bubble_text_rect in bubble_text_rects:
+            current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
+            if rects_intersect(current_bbox, bubble_text_rect):
+                moves = {
+                    'up': current_bbox[3] - bubble_text_rect[1],
+                    'down': bubble_text_rect[3] - current_bbox[1],
+                    'left': current_bbox[2] - bubble_text_rect[0],
+                    'right': bubble_text_rect[2] - current_bbox[0]
+                }
+                min_move_dir = min(moves, key=moves.get)
+                if min_move_dir == 'up':
+                    adj_y -= moves['up']
+                elif min_move_dir == 'down':
+                    adj_y += moves['down']
+                elif min_move_dir == 'left':
+                    adj_x -= moves['left']
+                elif min_move_dir == 'right':
+                    adj_x += moves['right']
+                moved = True
+        if not moved:
+            break
+
+    if img_size:
+        img_w, img_h = img_size
+        adj_x = max(w / 2, min(adj_x, img_w - w / 2))
+        adj_y = max(h / 2, min(adj_y, img_h - h / 2))
+
+    return adj_x, adj_y
+
+
 def _wrap_text(text, font_path, font_size, style, max_width):
-    """단어/글자 단위로 줄 바꿈을 수행하는 함수입니다."""
     lines = []
     for paragraph in text.split('\n'):
-        words = re.findall(r'(·+|[!?]+|\S+)', paragraph)
+        words = re.findall(r'(Â·+|[!?]+|\S+)', paragraph)
         if not words:
             continue
         current_line = words[0]
         for word in words[1:]:
-            joiner = "" if re.match(r'^(·+|[!?⋯]+)$', word) else " "
+            joiner = "" if re.match(r'^(Â·+|[!?â‹¯]+)$', word) else " "
             if measure_line(current_line + joiner + word, font_path, font_size, style) <= max_width:
                 current_line += joiner + word
             else:
@@ -239,16 +281,17 @@ def _wrap_text(text, font_path, font_size, style, max_width):
 
 
 def _is_vertical(element, box_width, box_height):
-    """텍스트가 세로 쓰기인지 판단합니다."""
-    return (config.ENABLE_VERTICAL_TEXT
-            and ' ' not in element.translated_text
-            and box_width > 0
-            and (box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD))
+    return (
+        config.ENABLE_VERTICAL_TEXT
+        and box_height > box_width * 1.2
+        and element.font_size >= config.MIN_READABLE_TEXT_SIZE
+        and ' ' not in element.translated_text
+        and box_width > 0
+        and (box_height / box_width >= config.VERTICAL_TEXT_THRESHOLD)
+    )
 
 
 def _aggressive_wrap(text, font_path, font_size, style, max_width):
-    """모든 공백에서 줄바꿈하되, 여전히 넘치는 줄은 가장 가까운 공백에서 한번 더 쪼갭니다.
-    단어 자체는 절대 쪼개지 않습니다."""
     raw_lines = text.replace('\n', ' ').split(' ')
     lines = []
     current = ""
@@ -268,7 +311,6 @@ def _aggressive_wrap(text, font_path, font_size, style, max_width):
 
 
 def _find_best_font_size(text, font_path, font_size, target_width, target_height, wrap_fn, style, min_size=None):
-    """주어진 wrap 함수로 텍스트를 감싸면서 맞는 폰트 크기를 찾습니다."""
     wrapped_text = text
     current_size = font_size
     minimum_size = max(config.MIN_FONT_SIZE, min_size or config.MIN_FONT_SIZE)
@@ -292,8 +334,17 @@ def _find_best_font_size(text, font_path, font_size, target_width, target_height
     return fallback_text, minimum_size, False
 
 
-def _score_wrapped_candidate(wrapped_text, font_path, font_size, style, target_width, target_height, bubble_ratio):
-    """커뮤니티 식질 규칙을 기반으로 래핑 후보를 점수화합니다."""
+def _score_wrapped_candidate(
+    wrapped_text,
+    font_path,
+    font_size,
+    style,
+    target_width,
+    target_height,
+    bubble_ratio,
+    char_ratio_target=None,
+    char_ratio_reference_height=None,
+):
     text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
     lines = [line for line in wrapped_text.split('\n') if line.strip()]
     if not lines:
@@ -344,11 +395,26 @@ def _score_wrapped_candidate(wrapped_text, font_path, font_size, style, target_w
         if idx in (0, len(lines) - 1) and _visible_len(stripped) <= 2 and len(lines) >= 3:
             score -= 6.0
 
+    if char_ratio_target is not None and getattr(config, "FONT_CHAR_FIT_ENABLED", True):
+        reference_height = (
+            max(float(char_ratio_reference_height), 1.0)
+            if char_ratio_reference_height is not None
+            else target_height
+        )
+        measured_char_ratio = measure_character_body_height_ratio(
+            wrapped_text,
+            font_path,
+            font_size,
+            style,
+            reference_height=reference_height,
+        )
+        char_rel_error = abs(measured_char_ratio - char_ratio_target) / max(char_ratio_target, 1e-4)
+        score -= char_rel_error * float(getattr(config, "FONT_CHAR_SCORE_WEIGHT", 42.0))
+
     return score
 
 
 def _get_font_search_start(initial_font_size, target_height):
-    """OCR 추정치가 낮더라도 말풍선 높이 기준으로 충분한 탐색을 시작합니다."""
     return max(
         config.MIN_FONT_SIZE,
         min(
@@ -358,8 +424,11 @@ def _get_font_search_start(initial_font_size, target_height):
     )
 
 
+def _is_font_size_correction_enabled():
+    return bool(getattr(config, "FONT_SIZE_CORRECTION_ENABLED", True))
+
+
 def _get_model_font_upper_bound(initial_font_size):
-    """모델 추정 폰트 크기 대비 허용 가능한 최대 확대 상한을 반환합니다."""
     predicted_size = max(1, int(round(initial_font_size)))
     growth_ratio = max(1.0, float(config.MODEL_FONT_SIZE_CEILING_RATIO))
     capped_size = int(math.floor(predicted_size * growth_ratio))
@@ -370,7 +439,6 @@ def _get_model_font_upper_bound(initial_font_size):
 
 
 def _build_wrap_candidates(text, bubble_ratio):
-    """말풍선 형태에 맞춰 일반/강제/balanced wrap 후보를 구성합니다."""
     candidates = [
         _wrap_text_korean,
         _wrap_text,
@@ -389,6 +457,19 @@ def _build_wrap_candidates(text, bubble_ratio):
     return candidates
 
 
+def _get_char_ratio_target(element):
+    if not getattr(config, "FONT_CHAR_FIT_ENABLED", True):
+        return None
+    char_ratio = getattr(element, "font_char_ratio", None)
+    if char_ratio is None:
+        return None
+    try:
+        char_ratio = float(char_ratio)
+    except (TypeError, ValueError):
+        return None
+    return char_ratio if char_ratio > 0 else None
+
+
 def _evaluate_fit_candidates(
     text,
     start_size,
@@ -401,8 +482,9 @@ def _evaluate_fit_candidates(
     wrap_fns,
     minimum_size,
     preferred_minimum_size,
+    char_ratio_target,
+    char_ratio_reference_height,
 ):
-    """주어진 하한선에서 래핑 후보를 평가하고, fit 후보와 완화 후보를 분리합니다."""
     best_fit_candidate = None
     best_relaxed_candidate = None
 
@@ -420,7 +502,15 @@ def _evaluate_fit_candidates(
                 min_size=minimum_size,
             )
             score = _score_wrapped_candidate(
-                wrapped_text, font_path, found_size, style, target_width, target_height, bubble_ratio
+                wrapped_text,
+                font_path,
+                found_size,
+                style,
+                target_width,
+                target_height,
+                bubble_ratio,
+                char_ratio_target=char_ratio_target,
+                char_ratio_reference_height=char_ratio_reference_height,
             )
             if found_size < preferred_minimum_size:
                 score -= (preferred_minimum_size - found_size) * 12.0
@@ -435,16 +525,17 @@ def _evaluate_fit_candidates(
     return best_fit_candidate, best_relaxed_candidate
 
 
-def _find_best_fit_font(text, initial_font_size, target_width, target_height, font_path, style):
-    """영역에 맞는 최적의 폰트 크기를 찾고 텍스트를 정렬합니다.
-
-    전략:
-    1) 여러 래핑 전략 후보를 생성
-    2) 각 후보의 최대 적합 폰트 크기를 찾음
-    3) 한국어 줄 배치와 말풍선 실루엣을 점수화해 최적 후보를 선택
-    """
-    max_allowed_size = _get_model_font_upper_bound(initial_font_size)
-    start_size = min(_get_font_search_start(initial_font_size, target_height), max_allowed_size)
+def _select_fixed_size_wrap(
+    text,
+    initial_font_size,
+    target_width,
+    target_height,
+    font_path,
+    style,
+    char_ratio_target=None,
+    char_ratio_reference_height=None,
+):
+    fixed_size = max(1, int(round(initial_font_size)))
     bubble_ratio = target_height / max(target_width, 1)
     width_ratios = [1.0, 0.9]
     if bubble_ratio <= 0.9:
@@ -456,11 +547,82 @@ def _find_best_fit_font(text, initial_font_size, target_width, target_height, fo
 
     width_ratios = list(dict.fromkeys(width_ratios))
     wrap_fns = _build_wrap_candidates(text, bubble_ratio)
-    preferred_minimum_size = max(
-        config.MIN_FONT_SIZE,
-        min(config.MAX_FONT_SIZE, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
-    )
+    best_candidate = None
 
+    for width_ratio in width_ratios:
+        candidate_width = max(1.0, target_width * width_ratio)
+        for wrap_fn in wrap_fns:
+            wrapped_text = wrap_fn(text, font_path, fixed_size, style, candidate_width)
+            score = _score_wrapped_candidate(
+                wrapped_text,
+                font_path,
+                fixed_size,
+                style,
+                target_width,
+                target_height,
+                bubble_ratio,
+                char_ratio_target=char_ratio_target,
+                char_ratio_reference_height=char_ratio_reference_height,
+            )
+            candidate = (score, wrapped_text, wrap_fn.__name__, width_ratio)
+            if best_candidate is None or candidate[0] > best_candidate[0]:
+                best_candidate = candidate
+
+    if best_candidate is None:
+        return text, fixed_size
+
+    score, wrapped_text, wrap_name, width_ratio = best_candidate
+    logger.debug(
+        f"[font-fit-raw] text='{text[:20]}...' target=({target_width:.0f}x{target_height:.0f}) "
+        f"fixed={fixed_size}, wrap={wrap_name}, width_ratio={width_ratio:.2f}, score={score:.2f}"
+    )
+    return wrapped_text, fixed_size
+
+
+def _find_best_fit_font(
+    text,
+    initial_font_size,
+    target_width,
+    target_height,
+    font_path,
+    style,
+    char_ratio_target=None,
+    char_ratio_reference_height=None,
+):
+    if not _is_font_size_correction_enabled() and char_ratio_target is None:
+        return _select_fixed_size_wrap(
+            text,
+            initial_font_size,
+            target_width,
+            target_height,
+            font_path,
+            style,
+            char_ratio_target=char_ratio_target,
+            char_ratio_reference_height=char_ratio_reference_height,
+        )
+
+    if char_ratio_target is not None:
+        max_allowed_size = config.MAX_FONT_SIZE
+        start_size = _get_font_search_start(initial_font_size, target_height)
+        preferred_minimum_size = config.MIN_FONT_SIZE
+    else:
+        max_allowed_size = _get_model_font_upper_bound(initial_font_size)
+        start_size = min(_get_font_search_start(initial_font_size, target_height), max_allowed_size)
+        preferred_minimum_size = max(
+            config.MIN_FONT_SIZE,
+            min(config.MAX_FONT_SIZE, math.ceil(initial_font_size * config.MODEL_FONT_SIZE_FLOOR_RATIO)),
+        )
+    bubble_ratio = target_height / max(target_width, 1)
+    width_ratios = [1.0, 0.9]
+    if bubble_ratio <= 0.9:
+        width_ratios.extend([0.82, 0.72])
+    elif bubble_ratio >= config.TALL_BUBBLE_RATIO:
+        width_ratios.extend([0.78, 0.66, 0.56])
+    elif bubble_ratio >= 1.2:
+        width_ratios.extend([0.84, 0.74])
+
+    width_ratios = list(dict.fromkeys(width_ratios))
+    wrap_fns = _build_wrap_candidates(text, bubble_ratio)
     best_candidate, relaxed_candidate = _evaluate_fit_candidates(
         text,
         start_size,
@@ -473,6 +635,8 @@ def _find_best_fit_font(text, initial_font_size, target_width, target_height, fo
         wrap_fns,
         preferred_minimum_size,
         preferred_minimum_size,
+        char_ratio_target,
+        char_ratio_reference_height,
     )
 
     if best_candidate is None:
@@ -488,6 +652,8 @@ def _find_best_fit_font(text, initial_font_size, target_width, target_height, fo
             wrap_fns,
             config.MIN_FONT_SIZE,
             preferred_minimum_size,
+            char_ratio_target,
+            char_ratio_reference_height,
         )
         if best_candidate is None:
             best_candidate = fallback_candidate or relaxed_candidate
@@ -498,209 +664,172 @@ def _find_best_fit_font(text, initial_font_size, target_width, target_height, fo
     score, wrapped_text, found_size, wrap_name, width_ratio, fits = best_candidate
     logger.debug(
         f"[font-fit] text='{text[:20]}...' target=({target_width:.0f}x{target_height:.0f}) "
-        f"initial={start_size} → best={found_size}, wrap={wrap_name}, width_ratio={width_ratio:.2f}, "
+        f"initial={start_size} -> best={found_size}, wrap={wrap_name}, width_ratio={width_ratio:.2f}, "
         f"score={score:.2f}, fits={fits}, floor={preferred_minimum_size}, cap={max_allowed_size}"
     )
     return wrapped_text, found_size
 
 
-def _find_best_fit_font_vertical(text, initial_font_size, target_width, target_height, font_path, style):
-    """세로 쓰기 텍스트에 맞는 최적의 폰트 크기를 찾습니다."""
-    max_allowed_size = _get_model_font_upper_bound(initial_font_size)
-    font_size = min(initial_font_size, max_allowed_size)
-    text = text.replace("⋯", "︙")
+def _find_best_fit_font_vertical(
+    text,
+    initial_font_size,
+    target_width,
+    target_height,
+    font_path,
+    style,
+    char_ratio_target=None,
+    char_ratio_reference_height=None,
+):
+    if not _is_font_size_correction_enabled() and char_ratio_target is None:
+        fixed_size = max(1, int(round(initial_font_size)))
+        text = text.replace("â‹¯", "ï¸™")
+        tokens = re.findall(r'[!?]+|.', text)
+        vertical_text = "\n".join(tokens)
+        logger.debug(
+            f"[font-fit-raw-vertical] text='{text[:20]}...' target=({target_width:.0f}x{target_height:.0f}) "
+            f"fixed={fixed_size}"
+        )
+        return vertical_text, fixed_size
+
+    max_allowed_size = config.MAX_FONT_SIZE if char_ratio_target is not None else _get_model_font_upper_bound(initial_font_size)
+    text = text.replace("â‹¯", "ï¸™")
     tokens = re.findall(r'[!?]+|.', text)
     vertical_text = "\n".join(tokens)
 
-    current_size = font_size
-    while current_size >= config.MIN_FONT_SIZE:
+    best_candidate = None
+
+    for current_size in range(max_allowed_size, config.MIN_FONT_SIZE - 1, -1):
         text_w, text_h = measure_text(vertical_text, font_path, current_size, style)
-        if text_h <= target_height and text_w <= target_width:
-            break
-        current_size -= 1
+        if text_h > target_height or text_w > target_width:
+            continue
 
-    # 영역 대비 텍스트가 작으면 업스케일
-    text_w, text_h = measure_text(vertical_text, font_path, current_size, style)
-    if target_height > 0 and (text_h / target_height) < config.FONT_AREA_FILL_RATIO:
-        last_good_size = current_size
-        while current_size < max_allowed_size:
-            current_size += 1
-            temp_w, temp_h = measure_text(vertical_text, font_path, current_size, style)
-            if temp_h > target_height or temp_w > target_width:
-                break
-            last_good_size = current_size
-        current_size = last_good_size
+        score = current_size * 4.0
+        fill_ratio = (text_w * text_h) / max(target_width * target_height, 1.0)
+        if fill_ratio < config.FONT_AREA_FILL_RATIO:
+            score -= (config.FONT_AREA_FILL_RATIO - fill_ratio) * 18.0
 
-    return vertical_text, current_size
+        if char_ratio_target is not None:
+            reference_height = (
+                max(float(char_ratio_reference_height), 1.0)
+                if char_ratio_reference_height is not None
+                else target_height
+            )
+            measured_char_ratio = measure_character_body_height_ratio(
+                vertical_text,
+                font_path,
+                current_size,
+                style,
+                reference_height=reference_height,
+            )
+            char_rel_error = abs(measured_char_ratio - char_ratio_target) / max(char_ratio_target, 1e-4)
+            score -= char_rel_error * float(getattr(config, "FONT_CHAR_SCORE_WEIGHT", 42.0))
+
+        if best_candidate is None or score > best_candidate[0]:
+            best_candidate = (score, current_size)
+
+    if best_candidate is not None:
+        return vertical_text, best_candidate[1]
+
+    return vertical_text, max(config.MIN_FONT_SIZE, min(initial_font_size, max_allowed_size))
 
 
 def _fit_text(element, target_width, target_height, font_path, style):
-    """수직/수평을 판단하여 최적 폰트 크기와 텍스트를 반환합니다."""
     box_width = element.text_box[2] - element.text_box[0]
     box_height = element.text_box[3] - element.text_box[1]
     vertical = _is_vertical(element, box_width, box_height)
+    char_ratio_target = _get_char_ratio_target(element)
+    char_ratio_reference_height = max(box_height, 1)
 
     if vertical:
         wrapped_text, font_size = _find_best_fit_font_vertical(
             element.translated_text, element.font_size,
-            box_width, box_height * (1 + config.VERTICAL_TOLERANCE_RATIO), font_path, style
+            box_width,
+            box_height * (1 + config.VERTICAL_TOLERANCE_RATIO),
+            font_path,
+            style,
+            char_ratio_target=char_ratio_target,
+            char_ratio_reference_height=char_ratio_reference_height,
         )
     else:
         wrapped_text, font_size = _find_best_fit_font(
             element.translated_text, element.font_size,
-            target_width, target_height, font_path, style
+            target_width,
+            target_height,
+            font_path,
+            style,
+            char_ratio_target=char_ratio_target,
+            char_ratio_reference_height=char_ratio_reference_height,
         )
 
     return wrapped_text, font_size, vertical
 
 
-def _get_alignment_for_bubble(attachment, text_box, bubble_box):
-    """말풍선 내 텍스트 위치를 정렬합니다."""
-    text_x1, text_y1, text_x2, text_y2 = text_box
-    bubble_x1, _, bubble_x2, _ = bubble_box
-    center_y = (text_y1 + text_y2) // 2
+def plan_bubble_text(element, alignment, target_width, target_height, font_path, style):
+    wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
 
-    if attachment == 'left':
-        align, anchor = 'left', 'lm'
-        center_x = max(text_x1 - config.ATTACHED_BUBBLE_TEXT_MARGIN, bubble_x1 + config.BUBBLE_EDGE_SAFE_MARGIN)
-    elif attachment == 'right':
-        align, anchor = 'right', 'rm'
-        center_x = min(text_x2 + config.ATTACHED_BUBBLE_TEXT_MARGIN, bubble_x2 - config.BUBBLE_EDGE_SAFE_MARGIN)
-    else:  # 'none'
-        align, anchor = 'center', 'mm'
-        center_x = (text_x1 + text_x2) // 2
-    return align, anchor, center_x, center_y
-
-
-def _adjust_freeform_position(freeform_bbox, center_x, center_y, bubble_text_rects, img_size=None):
-    """말풍선 밖 텍스트가 다른 텍스트와 겹치지 않도록 위치를 조정합니다."""
-    adj_x, adj_y = center_x, center_y
-    w, h = freeform_bbox[2] - freeform_bbox[0], freeform_bbox[3] - freeform_bbox[1]
-
-    for _ in range(3):  # 최대 3회 재검사
-        moved = False
-        for bubble_text_rect in bubble_text_rects:
-            current_bbox = (adj_x - w / 2, adj_y - h / 2, adj_x + w / 2, adj_y + h / 2)
-            if rects_intersect(current_bbox, bubble_text_rect):
-                moves = {
-                    'up': current_bbox[3] - bubble_text_rect[1],
-                    'down': bubble_text_rect[3] - current_bbox[1],
-                    'left': current_bbox[2] - bubble_text_rect[0],
-                    'right': bubble_text_rect[2] - current_bbox[0]
-                }
-                min_move_dir = min(moves, key=moves.get)
-                if min_move_dir == 'up': adj_y -= moves['up']
-                elif min_move_dir == 'down': adj_y += moves['down']
-                elif min_move_dir == 'left': adj_x -= moves['left']
-                elif min_move_dir == 'right': adj_x += moves['right']
-                moved = True
-        if not moved:
-            break
-
-    # 이미지 경계 클램핑
-    if img_size:
-        img_w, img_h = img_size
-        adj_x = max(w / 2, min(adj_x, img_w - w / 2))
-        adj_y = max(h / 2, min(adj_y, img_h - h / 2))
-
-    return adj_x, adj_y
-
-
-def _render_text(img_pil, wrapped_text, font_path, font_size, center_x, center_y, angle, style,
-                 align='center', anchor='mm'):
-    """텍스트를 렌더링하고 바운딩 박스를 반환합니다. 회전이 필요하면 회전 처리합니다."""
-    if abs(angle) > config.MIN_ROTATION_ANGLE:
-        return render_rotated_text_on_image(
-            img_pil, wrapped_text, center_x, center_y, angle,
-            font_path, font_size, style, align
-        )
-    else:
-        return render_text_on_image(
-            img_pil, wrapped_text, center_x, center_y,
-            font_path, font_size, style, align, anchor
-        )
-
-
-def _draw_speech_bubble_texts(img_pil, page_data):
-    """말풍선 텍스트를 그립니다."""
-    bubble_text_rects = []
-    for bubble in page_data.speech_bubbles:
-        element = bubble.text_element
-        if not element.translated_text:
-            continue
-
-        font_path = config.FONT_MAP.get(element.font_style, config.DEFAULT_FONT_PATH)
-        element.translated_text = replace_unsupported_chars(element.translated_text, font_path)
-
-        bubble_width = bubble.bubble_box[2] - bubble.bubble_box[0]
-        bubble_height = bubble.bubble_box[3] - bubble.bubble_box[1]
-        text_w = element.text_box[2] - element.text_box[0]
-        text_h = element.text_box[3] - element.text_box[1]
-        target_width = bubble_width * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
-        target_height = bubble_height * (1.0 - (config.BUBBLE_PADDING_RATIO * 2))
-        logger.debug(f"[bubble] '{element.translated_text[:15]}...' bubble=({bubble_width}x{bubble_height}) "
-                     f"text_box=({text_w:.0f}x{text_h:.0f}) target=({target_width:.0f}x{target_height:.0f}) "
-                     f"pred_font={element.font_size}")
-
-        style = _resolve_bubble_style(element, bubble.bubble_box, target_width, target_height)
-        wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
-
-        if vertical:
-            center_x = (element.text_box[0] + element.text_box[2]) / 2
-            center_y = (element.text_box[1] + element.text_box[3]) / 2
-            bbox = _render_text(img_pil, wrapped_text, font_path, font_size, center_x, center_y, 0, style)
-        else:
-            align, anchor, center_x, center_y = _get_alignment_for_bubble(
-                bubble.attachment, element.text_box, bubble.bubble_box
-            )
-            bbox = _render_text(
-                img_pil, wrapped_text, font_path, font_size,
-                center_x, center_y, element.angle, style, align, anchor
-            )
-
-        bubble_text_rects.append(bbox)
-    return bubble_text_rects
-
-
-def _draw_freeform_texts(img_pil, page_data, bubble_text_rects):
-    """말풍선 밖 텍스트를 그립니다."""
-    for element in page_data.freeform_texts:
-        if not element.translated_text:
-            continue
-
-        font_path = config.FONT_MAP.get(element.font_style, config.DEFAULT_FONT_PATH)
-        element.translated_text = replace_unsupported_chars(element.translated_text, font_path)
-
-        box_width = element.text_box[2] - element.text_box[0]
-        box_height = element.text_box[3] - element.text_box[1]
-        target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
-        target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
-        style = _resolve_freeform_style(element, box_width, box_height)
-
-        wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
-
+    if vertical:
         center_x = (element.text_box[0] + element.text_box[2]) / 2
-        if vertical:
-            center_y = (element.text_box[1] + element.text_box[3]) / 2
-        else:
-            _, text_h = measure_text(wrapped_text, font_path, font_size, style)
-            center_y = element.text_box[1] + text_h / 2
+        center_y = (element.text_box[1] + element.text_box[3]) / 2
+        return TextRenderPlan(
+            text=wrapped_text,
+            font_path=font_path,
+            font_size=font_size,
+            style=style,
+            center_x=center_x,
+            center_y=center_y,
+            angle=0,
+            align="center",
+            anchor="mm",
+            vertical=True,
+        )
 
-        text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
-        initial_bbox = (center_x - text_w / 2, center_y - text_h / 2,
-                        center_x + text_w / 2, center_y + text_h / 2)
-        img_size = (img_pil.width, img_pil.height)
-        adj_x, adj_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects, img_size)
+    align, anchor, center_x, center_y = alignment
+    return TextRenderPlan(
+        text=wrapped_text,
+        font_path=font_path,
+        font_size=font_size,
+        style=style,
+        center_x=center_x,
+        center_y=center_y,
+        angle=0,
+        align=align,
+        anchor=anchor,
+        vertical=False,
+    )
 
-        _render_text(img_pil, wrapped_text, font_path, font_size, adj_x, adj_y,
-                     element.angle if not vertical else 0, style)
 
+def plan_freeform_text(element, bubble_text_rects, img_size, font_path, style):
+    box_width = element.text_box[2] - element.text_box[0]
+    box_height = element.text_box[3] - element.text_box[1]
+    target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
+    target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
+    wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
 
-def draw_text_on_image(inpainted_image, page_data: PageData):
-    """Inpainted된 이미지 위에 PageData의 번역된 텍스트를 그립니다."""
-    img_pil = Image.fromarray(inpainted_image)
+    center_x = (element.text_box[0] + element.text_box[2]) / 2
+    text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
+    if vertical:
+        center_y = (element.text_box[1] + element.text_box[3]) / 2
+    else:
+        center_y = element.text_box[1] + text_h / 2
+    initial_bbox = (
+        center_x - text_w / 2,
+        center_y - text_h / 2,
+        center_x + text_w / 2,
+        center_y + text_h / 2,
+    )
 
-    bubble_text_rects = _draw_speech_bubble_texts(img_pil, page_data)
-    _draw_freeform_texts(img_pil, page_data, bubble_text_rects)
+    adj_x, adj_y = _adjust_freeform_position(initial_bbox, center_x, center_y, bubble_text_rects, img_size)
 
-    return np.array(img_pil)
+    return TextRenderPlan(
+        text=wrapped_text,
+        font_path=font_path,
+        font_size=font_size,
+        style=style,
+        center_x=adj_x,
+        center_y=adj_y,
+        angle=element.angle if not vertical else 0,
+        align="center",
+        anchor="mm",
+        vertical=vertical,
+        initial_bbox=initial_bbox,
+    )

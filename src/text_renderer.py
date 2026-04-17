@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
+import cv2
 import numpy as np
 import skia
 from PIL import Image
@@ -87,21 +88,47 @@ def _has_glyph(font_path: str, char: str) -> bool:
     return len(glyphs) > 0 and glyphs[0] != 0
 
 
-def replace_unsupported_chars(text: str, font_path: str) -> str:
-    """폰트가 지원하지 않는 특수문자를 대체합니다.
-    ⋯(U+22EF) → ・・・(U+30FB) → ...(ASCII) 순으로 폴백."""
-    if "⋯" in text and not _has_glyph(font_path, "⋯"):
-        if _has_glyph(font_path, "・"):
-            text = text.replace("⋯", "・・・")
-        else:
-            text = text.replace("⋯", "...")
-    if "︙" in text and not _has_glyph(font_path, "︙"):
-        text = text.replace("︙", "⋮" if _has_glyph(font_path, "⋮") else ":")
-    return text
+def _style_cache_key(style: TextStyle) -> Tuple:
+    """Create a hashable key for style-aware caches."""
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+    return (
+        style.color,
+        style.letter_spacing,
+        style.horizontal_scale,
+        style.line_spacing,
+        style.stroke_width,
+        style.stroke_color,
+        style.embolden,
+        style.oversample_scale,
+        style.subpixel,
+        style.baseline_snap,
+        style.linear_metrics,
+        style.hinting,
+    )
 
 
-def _make_font(font_path: str, font_size: int, style: TextStyle) -> skia.Font:
-    """skia.Font 객체 생성."""
+def _style_from_cache_key(style_key: Tuple) -> TextStyle:
+    return TextStyle(
+        color=style_key[0],
+        letter_spacing=style_key[1],
+        horizontal_scale=style_key[2],
+        line_spacing=style_key[3],
+        stroke_width=style_key[4],
+        stroke_color=style_key[5],
+        embolden=style_key[6],
+        oversample_scale=style_key[7],
+        subpixel=style_key[8],
+        baseline_snap=style_key[9],
+        linear_metrics=style_key[10],
+        hinting=style_key[11],
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _make_font_cached(font_path: str, font_size: int, style_key: Tuple) -> skia.Font:
+    """Return a cached skia.Font for measurement and rendering."""
+    style = _style_from_cache_key(style_key)
     typeface = _load_typeface(font_path)
     font = skia.Font(typeface, font_size)
     font.setScaleX(style.horizontal_scale)
@@ -123,6 +150,19 @@ def _make_font(font_path: str, font_size: int, style: TextStyle) -> skia.Font:
     return font
 
 
+def replace_unsupported_chars(text: str, font_path: str) -> str:
+    """폰트가 지원하지 않는 특수문자를 대체합니다.
+    ⋯(U+22EF) → ・・・(U+30FB) → ...(ASCII) 순으로 폴백."""
+    if "⋯" in text and not _has_glyph(font_path, "⋯"):
+        if _has_glyph(font_path, "・"):
+            text = text.replace("⋯", "・・・")
+        else:
+            text = text.replace("⋯", "...")
+    if "︙" in text and not _has_glyph(font_path, "︙"):
+        text = text.replace("︙", "⋮" if _has_glyph(font_path, "⋮") else ":")
+    return text
+
+
 def _compute_glyph_positions(font: skia.Font, text: str, letter_spacing: float) -> Tuple[list, list, float]:
     """글리프 ID + 자간 적용된 x 위치 계산.
     Returns: (glyphs, x_positions, total_width)
@@ -140,22 +180,18 @@ def _compute_glyph_positions(font: skia.Font, text: str, letter_spacing: float) 
     return list(glyphs), x_positions, total_width
 
 
-def measure_line(text: str, font_path: str, font_size: int, style: TextStyle = None) -> float:
-    """한 줄 텍스트의 너비를 측정합니다 (자간 + 평체 적용).
-    Pillow의 font.getlength() 대체."""
-    if style is None:
-        style = DEFAULT_STYLES["standard"]
-    font = _make_font(font_path, font_size, style)
+@functools.lru_cache(maxsize=4096)
+def _measure_line_cached(text: str, font_path: str, font_size: int, style_key: Tuple) -> float:
+    style = _style_from_cache_key(style_key)
+    font = _make_font_cached(font_path, font_size, style_key)
     _, _, width = _compute_glyph_positions(font, text, style.letter_spacing)
     return width
 
 
-def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = None) -> Tuple[float, float]:
-    """멀티라인 텍스트의 (width, height)를 측정합니다.
-    Pillow의 draw.multiline_textbbox() 대체."""
-    if style is None:
-        style = DEFAULT_STYLES["standard"]
-    font = _make_font(font_path, font_size, style)
+@functools.lru_cache(maxsize=4096)
+def _measure_text_cached(text: str, font_path: str, font_size: int, style_key: Tuple) -> Tuple[float, float]:
+    style = _style_from_cache_key(style_key)
+    font = _make_font_cached(font_path, font_size, style_key)
     lines = text.split('\n')
     max_width = 0.0
     for line in lines:
@@ -164,13 +200,13 @@ def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = N
 
     line_height = font_size * style.line_spacing
     total_height = line_height * len(lines)
-
     return max_width, total_height
 
 
-def _build_text_layout(text: str, font_path: str, font_size: int, style: TextStyle):
-    """줄 단위 렌더링에 필요한 레이아웃 정보를 계산합니다."""
-    font = _make_font(font_path, font_size, style)
+@functools.lru_cache(maxsize=2048)
+def _build_text_layout_cached(text: str, font_path: str, font_size: int, style_key: Tuple):
+    style = _style_from_cache_key(style_key)
+    font = _make_font_cached(font_path, font_size, style_key)
     line_height = font_size * style.line_spacing
     lines_data = []
     max_width = 0.0
@@ -185,8 +221,75 @@ def _build_text_layout(text: str, font_path: str, font_size: int, style: TextSty
         "line_height": line_height,
         "text_width": max_width,
         "text_height": line_height * len(lines_data),
-        "lines_data": lines_data,
+        "lines_data": tuple(lines_data),
     }
+
+
+def measure_line(text: str, font_path: str, font_size: int, style: TextStyle = None) -> float:
+    """한 줄 텍스트의 너비를 측정합니다 (자간 + 평체 적용).
+    Pillow의 font.getlength() 대체."""
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+    return _measure_line_cached(text, font_path, font_size, _style_cache_key(style))
+
+
+def measure_text(text: str, font_path: str, font_size: int, style: TextStyle = None) -> Tuple[float, float]:
+    """멀티라인 텍스트의 (width, height)를 측정합니다.
+    Pillow의 draw.multiline_textbbox() 대체."""
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+    return _measure_text_cached(text, font_path, font_size, _style_cache_key(style))
+
+
+def _build_text_layout(text: str, font_path: str, font_size: int, style: TextStyle):
+    """줄 단위 렌더링에 필요한 레이아웃 정보를 계산합니다."""
+    return _build_text_layout_cached(text, font_path, font_size, _style_cache_key(style))
+
+
+@functools.lru_cache(maxsize=4096)
+def _measure_character_body_cached(text: str, font_path: str, font_size: int, style_key: Tuple) -> Tuple[float, float]:
+    font = _make_font_cached(font_path, font_size, style_key)
+    normalized_text = replace_unsupported_chars(text, font_path)
+    body_widths = []
+    body_heights = []
+
+    for char in normalized_text:
+        if char.isspace():
+            continue
+        glyphs = font.textToGlyphs(char)
+        if len(glyphs) == 0:
+            continue
+        _, bounds = font.getWidthsBounds(glyphs, None)
+        for rect in bounds:
+            width = float(rect.width())
+            height = float(rect.height())
+            if width <= 0.0 or height <= 0.0:
+                continue
+            body_widths.append(width)
+            body_heights.append(height)
+
+    if not body_widths or not body_heights:
+        return 0.0, 0.0
+
+    return float(np.median(body_widths)), float(np.median(body_heights))
+
+
+def measure_character_body_size(text: str, font_path: str, font_size: int, style: TextStyle = None) -> Tuple[float, float]:
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+    return _measure_character_body_cached(text, font_path, font_size, _style_cache_key(style))
+
+
+def measure_character_body_height_ratio(
+    text: str,
+    font_path: str,
+    font_size: int,
+    style: TextStyle = None,
+    reference_height: float = 1.0,
+) -> float:
+    resolved_reference = max(float(reference_height), 1.0)
+    _, body_height = measure_character_body_size(text, font_path, font_size, style)
+    return body_height / resolved_reference
 
 
 def _paint_text_blob(canvas: skia.Canvas, font: skia.Font, glyphs, positioned_x, baseline_y, style: TextStyle):
@@ -215,6 +318,7 @@ def _render_text_layer(
     font_size: int,
     style: TextStyle,
     align: str = "center",
+    layout=None,
 ):
     """텍스트만 들어간 투명 레이어를 생성합니다."""
     oversample = max(1, style.oversample_scale)
@@ -232,7 +336,8 @@ def _render_text_layer(
         linear_metrics=style.linear_metrics,
         hinting=style.hinting,
     )
-    layout = _build_text_layout(text, font_path, font_size * oversample, oversampled_style)
+    if layout is None:
+        layout = _build_text_layout(text, font_path, font_size * oversample, oversampled_style)
     padding = max(4, int(round(font_size * 0.35)))
     layer_width = max(1, int(np.ceil(layout["text_width"] / oversample)) + padding * 2)
     layer_height = max(1, int(np.ceil(layout["text_height"] / oversample)) + padding * 2)
@@ -264,6 +369,39 @@ def _render_text_layer(
         snapshot = snapshot.resize((layer_width, layer_height), resample=Image.Resampling.LANCZOS)
 
     return snapshot, layer_width, layer_height, padding
+
+
+def measure_rendered_stroke_width(text: str, font_path: str, font_size: int, style: TextStyle = None, align: str = "center") -> float:
+    if style is None:
+        style = DEFAULT_STYLES["standard"]
+
+    text_layer, _, _, _ = _render_text_layer(text, font_path, font_size, style, align)
+    alpha = np.array(text_layer.getchannel("A"), dtype=np.uint8)
+    mask = (alpha > 24).astype(np.uint8)
+    if mask.sum() == 0:
+        return 0.0
+
+    distances = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    positive = distances[distances > 0]
+    if positive.size == 0:
+        return 0.0
+
+    # The upper quantile is more stable than the absolute max on anti-aliased glyphs.
+    stroke_radius = float(np.percentile(positive, 84))
+    return max(0.0, stroke_radius * 2.0)
+
+
+def measure_rendered_stroke_ratio(
+    text: str,
+    font_path: str,
+    font_size: int,
+    style: TextStyle = None,
+    reference_height: float = 1.0,
+    align: str = "center",
+) -> float:
+    resolved_reference = max(float(reference_height), 1.0)
+    stroke_width = measure_rendered_stroke_width(text, font_path, font_size, style, align=align)
+    return stroke_width / resolved_reference
 
 
 def render_text_on_image(
@@ -334,7 +472,6 @@ def render_rotated_text_on_image(
     """회전된 텍스트를 렌더링합니다."""
     if style is None:
         style = DEFAULT_STYLES["standard"]
-
     text_layer, text_w, text_h, _ = _render_text_layer(text, font_path, font_size, style, align)
     rotated = text_layer.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
 

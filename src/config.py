@@ -7,8 +7,30 @@ import torch
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 
-# JSON 직렬화에서 제외할 필드 (런타임 전용)
-_EXCLUDED_FIELDS = {"DEVICE"}
+# JSON 직렬화에서 제외할 필드
+# - DEVICE: 런타임 환경(GPU/CPU)에서 자동 결정
+# - FONT_*_ENABLED / *_RATIO / *_WEIGHT / *_THRESHOLD / TTA_* 등 "파생 필드":
+#   apply_font_modes()가 고수준 모드에서 자동 재계산하므로 JSON에 넣지 않는다.
+_EXCLUDED_FIELDS = {
+    "DEVICE",
+    # 크기 보정 모드에서 파생
+    "FONT_SIZE_CORRECTION_ENABLED",
+    "FONT_CHAR_FIT_ENABLED",
+    "FONT_STROKE_FIT_ENABLED",
+    "FONT_CHAR_SCORE_WEIGHT",
+    "FONT_STROKE_SCORE_WEIGHT",
+    # 허용 오차에서 파생
+    "MODEL_FONT_SIZE_FLOOR_RATIO",
+    "MODEL_FONT_SIZE_CEILING_RATIO",
+    # 스타일 폴백 모드에서 파생
+    "FONT_STYLE_FALLBACK_ENABLED",
+    "FONT_STYLE_LOW_CONFIDENCE_THRESHOLD",
+    "FONT_STYLE_LOW_MARGIN_THRESHOLD",
+    "FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD",
+    # TTA 모드에서 파생
+    "FONT_MODEL_TTA_ENABLED",
+    "FONT_MODEL_TTA_VARIANTS",
+}
 
 
 @dataclass

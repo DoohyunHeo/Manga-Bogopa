@@ -161,7 +161,12 @@ def _resolve_style_name(font_model, predicted_index):
     return "standard"
 
 
-def _choose_style_name(font_model, style_probs_row, angle_deg, expressive_logits_row=None):
+def _choose_style_name(font_model, style_probs_row, angle_deg, expressive_logits_row=None, class_name="text"):
+    """Select the final font style for a text item.
+
+    Handles both the generic confidence-based fallback (for any class) and the
+    free_text specialization where "standard" is treated as narration.
+    """
     style_probs_cpu = style_probs_row.detach().cpu()
     top_k = min(2, int(style_probs_cpu.shape[0]))
     top_values, top_indices = torch.topk(style_probs_cpu, k=top_k)
@@ -174,28 +179,46 @@ def _choose_style_name(font_model, style_probs_row, angle_deg, expressive_logits
     if expressive_logits_row is not None and getattr(font_model, "has_expressive_head", False):
         expressive_confidence = float(torch.sigmoid(expressive_logits_row.detach().cpu()))
 
-    if not getattr(config, "FONT_STYLE_FALLBACK_ENABLED", True):
-        return predicted_style, top_confidence, expressive_confidence
+    fallback_target = _freeform_fallback_style(class_name)
+    fallback_enabled = getattr(config, "FONT_STYLE_FALLBACK_ENABLED", True)
+
     if predicted_style == "standard":
-        return "standard", top_confidence, expressive_confidence
+        return fallback_target, top_confidence, expressive_confidence
+    if not fallback_enabled:
+        # Generic fallback is off, but freeform confidence rule still applies.
+        if _freeform_needs_fallback(class_name, top_confidence):
+            return fallback_target, top_confidence, expressive_confidence
+        return predicted_style, top_confidence, expressive_confidence
 
     low_confidence_threshold = float(getattr(config, "FONT_STYLE_LOW_CONFIDENCE_THRESHOLD", 0.24))
     low_margin_threshold = float(getattr(config, "FONT_STYLE_LOW_MARGIN_THRESHOLD", 0.04))
-    fallback_max_angle = _STYLE_FALLBACK_MAX_ANGLE
     expressive_prob_threshold = float(getattr(config, "FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD", 0.55))
-    style_specific_thresholds = _STYLE_SPECIAL_MIN_CONFIDENCE
-    style_specific_threshold = float(style_specific_thresholds.get(predicted_style, low_confidence_threshold))
+    style_specific_threshold = float(_STYLE_SPECIAL_MIN_CONFIDENCE.get(predicted_style, low_confidence_threshold))
 
-    if expressive_confidence is not None and expressive_confidence < expressive_prob_threshold:
-        return "standard", top_confidence, expressive_confidence
-    if top_confidence < low_confidence_threshold:
-        return "standard", top_confidence, expressive_confidence
-    if top_confidence < style_specific_threshold:
-        return "standard", top_confidence, expressive_confidence
-    if confidence_margin < low_margin_threshold and abs(float(angle_deg)) <= fallback_max_angle:
-        return "standard", top_confidence, expressive_confidence
+    triggered_fallback = (
+        (expressive_confidence is not None and expressive_confidence < expressive_prob_threshold)
+        or top_confidence < low_confidence_threshold
+        or top_confidence < style_specific_threshold
+        or (confidence_margin < low_margin_threshold and abs(float(angle_deg)) <= _STYLE_FALLBACK_MAX_ANGLE)
+        or _freeform_needs_fallback(class_name, top_confidence)
+    )
 
+    if triggered_fallback:
+        return fallback_target, top_confidence, expressive_confidence
     return predicted_style, top_confidence, expressive_confidence
+
+
+def _freeform_fallback_style(class_name):
+    """free_text items fall back to narration (which IS their "standard")."""
+    return "narration" if class_name == "free_text" else "standard"
+
+
+def _freeform_needs_fallback(class_name, top_confidence):
+    """Freeform items have a stricter confidence floor to avoid weak style picks."""
+    if class_name != "free_text":
+        return False
+    min_confidence = float(getattr(config, "FREEFORM_STYLE_MIN_CONFIDENCE", 0.70))
+    return top_confidence < min_confidence
 
 
 def _resolve_font_size(font_model, raw_size_value, item, page_height):
@@ -319,7 +342,8 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
                 if page_heights and batch_items[j].get("page_idx") is not None
                 else 1600
             )
-            style_name = "standard"
+            batch_class_name = batch_items[j].get("class_name", "text")
+            style_name = _freeform_fallback_style(batch_class_name)
             style_confidence = None
             expressive_confidence = None
             if pred_style_indices is not None:
@@ -329,6 +353,7 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
                     avg_style_probs[j],
                     pred_angles[j],
                     averaged_expressive,
+                    class_name=batch_class_name,
                 )
 
             font_char_ratio = None
@@ -363,27 +388,6 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
     return all_props
 
 
-def _coerce_freeform_style(props, class_name):
-    """For free_text items, force narration when the style isn't a high-confidence non-standard pick.
-
-    Freeform text in manga is typically narration/SFX, so "standard" is treated
-    as the narration font; any weak prediction falls back to narration too.
-    """
-    if class_name != "free_text":
-        return props
-
-    min_confidence = float(getattr(config, "FREEFORM_STYLE_MIN_CONFIDENCE", 0.70))
-    confidence = props.get("font_style_confidence")
-    style = props.get("font_style") or "standard"
-    low_confidence = confidence is None or confidence < min_confidence
-
-    if style == "standard" or low_confidence:
-        adjusted = dict(props)
-        adjusted["font_style"] = "narration"
-        return adjusted
-    return props
-
-
 def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
     """Run OCR and font-property prediction for text boxes."""
     if not text_items:
@@ -412,11 +416,10 @@ def extract_text_properties(models, batch_images_rgb, text_items, batch_paths):
         if not _is_valid_text(ocr_text, item["box"]):
             filtered_count += 1
             continue
-        props = _coerce_freeform_style(all_props[i], item["class_name"])
         element = TextElement(
             text_box=item["box"].tolist(),
             original_text=ocr_text,
-            **props,
+            **all_props[i],
         )
         processed_text_elements.append({
             "element": element,

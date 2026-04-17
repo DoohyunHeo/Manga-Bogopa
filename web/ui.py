@@ -45,15 +45,26 @@ def _hex_to_rgb(hex_str: str, default=(0, 0, 0)):
 
 
 def _pick_folder(current_path: str = "") -> str:
-    """네이티브 폴더 선택 다이얼로그를 열고 선택된 경로를 반환합니다."""
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    folder = filedialog.askdirectory(
-        title="폴더 선택",
-        initialdir=current_path if current_path and os.path.isdir(current_path) else ".",
-    )
-    root.destroy()
+    """네이티브 폴더 선택 다이얼로그를 열고 선택된 경로를 반환합니다.
+
+    로컬 실행 전용. 서버/헤드리스 환경에서는 tkinter 초기화가 실패할 수 있으므로
+    조용히 기존 경로를 반환.
+    """
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        gr.Warning("디스플레이가 없어 폴더 선택 창을 열 수 없습니다. 경로를 직접 입력해 주세요.")
+        return current_path
+
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory(
+            title="폴더 선택",
+            initialdir=current_path if current_path and os.path.isdir(current_path) else ".",
+        )
+    finally:
+        root.destroy()
     return folder if folder else current_path
 
 
@@ -70,27 +81,33 @@ def _get_font_list():
 
 
 def _save_and_initialize(api_key, gemini_model, input_dir, output_dir):
-    """설정 저장 → 모델 로딩 → UI 전환."""
+    """초기 설정 저장 → 파이프라인 준비 → UI 전환.
+
+    yield로 3단계 상태를 UI에 노출: 검증 실패 / 저장 완료 / 준비 완료 | 실패.
+    """
     if not api_key.strip():
         yield ("API 키를 입력하세요.", gr.update(visible=True), gr.update(visible=False))
         return
 
-    config._config.GEMINI_API_KEY = api_key.strip()
+    c = config._config
+    c.GEMINI_API_KEY = api_key.strip()
     if gemini_model.strip():
-        config._config.GEMINI_MODEL = gemini_model.strip()
+        c.GEMINI_MODEL = gemini_model.strip()
     if input_dir.strip():
-        config._config.INPUT_DIR = input_dir.strip()
+        c.INPUT_DIR = input_dir.strip()
     if output_dir.strip():
-        config._config.OUTPUT_DIR = output_dir.strip()
+        c.OUTPUT_DIR = output_dir.strip()
     config.save()
 
     yield ("설정 저장 완료. 파이프라인을 초기화합니다...", gr.update(visible=True), gr.update(visible=False))
 
     try:
         app_state.initialize_pipeline()
-        yield ("준비 완료! 모델은 실행 시점에 로드됩니다.", gr.update(visible=False), gr.update(visible=True))
     except Exception as e:
         yield (f"모델 로딩 실패: {e}", gr.update(visible=True), gr.update(visible=False))
+        return
+
+    yield ("준비 완료! 모델은 실행 시점에 로드됩니다.", gr.update(visible=False), gr.update(visible=True))
 
 
 # ---------------------------------------------------------------------------

@@ -275,7 +275,8 @@ class Pass1Stage:
             batch_elapsed = time.perf_counter() - batch_started_at
             self.callback(ProgressEvent(
                 PipelinePhase.PASS1_BATCH, batch_idx, total_batches,
-                f"배치 {batch_idx}/{total_batches} 완료 ({len(valid_paths)}페이지, {batch_elapsed:.1f}초)",
+                f"{len(valid_paths)}페이지 · {batch_elapsed:.1f}초 "
+                f"(탐지 {detection_elapsed:.1f}s + 인식 {ocr_elapsed:.1f}s + 번역 {translation_elapsed:.1f}s)",
                 elapsed_sec=batch_elapsed,
                 extras={
                     "pages": len(valid_paths),

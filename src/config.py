@@ -77,7 +77,6 @@ class PipelineConfig:
     ENABLE_VERTICAL_TEXT: bool = True
     VERTICAL_TEXT_THRESHOLD: int = 4
     VERTICAL_FORCE_ASPECT_RATIO: float = 6.0
-    VERTICAL_TOLERANCE_RATIO: float = 0.05
     MIN_ROTATION_ANGLE: int = 2
     FONT_SHRINK_THRESHOLD_RATIO: float = 0.75
 
@@ -106,40 +105,19 @@ class PipelineConfig:
     FONT_SIZE_CORRECTION_ENABLED: bool = False
     FONT_CHAR_FIT_ENABLED: bool = True
     FONT_CHAR_SCORE_WEIGHT: float = 42.0
-    FONT_CHAR_RATIO_TO_FONT_SIZE_GAIN: float = 1.18
     FONT_STROKE_FIT_ENABLED: bool = True
     FONT_STROKE_SCORE_WEIGHT: float = 42.0
-    FONT_STROKE_RATIO_TO_FONT_SIZE_GAIN: float = 7.5
     FONT_STYLE_FALLBACK_ENABLED: bool = True
     FONT_STYLE_LOW_CONFIDENCE_THRESHOLD: float = 0.24
     FONT_STYLE_LOW_MARGIN_THRESHOLD: float = 0.04
-    FONT_STYLE_FALLBACK_MAX_ANGLE: int = 15
     FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD: float = 0.55
-    FONT_STYLE_SPECIAL_MIN_CONFIDENCE: Dict[str, float] = field(default_factory=lambda: {
-        "standard": 0.0,
-        "pop": 0.46,
-        "shouting": 0.42,
-        "handwriting": 0.40,
-        "angry": 0.38,
-        "cute": 0.38,
-        "scared": 0.38,
-        "embarrassment": 0.36,
-        "narration": 0.34,
-    })
     MIN_READABLE_TEXT_SIZE: int = 16
-    DEFAULT_TEXT_OVERSAMPLE: int = 2
-    SMALL_TEXT_OVERSAMPLE: int = 3
-    TALL_BUBBLE_RATIO: float = 1.8
-    TALL_BUBBLE_MIN_CHARS: int = 8
 
     # ── 말풍선 밖 텍스트 ──
     FREEFORM_PADDING_RATIO: float = 0.05
     FREEFORM_FONT_COLOR: Tuple[int, int, int] = (0, 0, 0)
     FREEFORM_STROKE_COLOR: Tuple[int, int, int] = (255, 255, 255)
     FREEFORM_STROKE_WIDTH: int = 2
-
-    # ── 이미지 크기 ──
-    IMAGE_SIZE: Tuple[int, int] = (224, 224)
 
     # ── 폰트 ──
     FONT_DIR: str = "data/fonts"
@@ -158,7 +136,6 @@ class PipelineConfig:
     # ── 폰트 설정 ──
     MIN_FONT_SIZE: int = 5
     MAX_FONT_SIZE: int = 80
-    DEFAULT_FONT_SIZE: int = 20
     FONT_AREA_FILL_RATIO: float = 0.35
 
     # ── 디버그 ──

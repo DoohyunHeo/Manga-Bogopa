@@ -17,6 +17,24 @@ from src.utils import Letterbox, calculate_iou, is_box_inside, merge_boxes
 
 logger = logging.getLogger(__name__)
 
+# Internal model/heuristic constants (not user-tunable).
+_FALLBACK_FONT_SIZE = 20
+_FONT_MODEL_INPUT_SIZE = (224, 224)
+_CHAR_RATIO_FONT_SIZE_GAIN = 1.18
+_STROKE_RATIO_FONT_SIZE_GAIN = 7.5
+_STYLE_FALLBACK_MAX_ANGLE = 15.0
+_STYLE_SPECIAL_MIN_CONFIDENCE = {
+    "standard": 0.0,
+    "pop": 0.46,
+    "shouting": 0.42,
+    "handwriting": 0.40,
+    "angry": 0.38,
+    "cute": 0.38,
+    "scared": 0.38,
+    "embarrassment": 0.36,
+    "narration": 0.34,
+}
+
 
 def _cuda_autocast_context():
     if config.DEVICE != "cuda":
@@ -163,9 +181,9 @@ def _choose_style_name(font_model, style_probs_row, angle_deg, expressive_logits
 
     low_confidence_threshold = float(getattr(config, "FONT_STYLE_LOW_CONFIDENCE_THRESHOLD", 0.24))
     low_margin_threshold = float(getattr(config, "FONT_STYLE_LOW_MARGIN_THRESHOLD", 0.04))
-    fallback_max_angle = float(getattr(config, "FONT_STYLE_FALLBACK_MAX_ANGLE", 15))
+    fallback_max_angle = _STYLE_FALLBACK_MAX_ANGLE
     expressive_prob_threshold = float(getattr(config, "FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD", 0.55))
-    style_specific_thresholds = getattr(config, "FONT_STYLE_SPECIAL_MIN_CONFIDENCE", {}) or {}
+    style_specific_thresholds = _STYLE_SPECIAL_MIN_CONFIDENCE
     style_specific_threshold = float(style_specific_thresholds.get(predicted_style, low_confidence_threshold))
 
     if expressive_confidence is not None and expressive_confidence < expressive_prob_threshold:
@@ -216,7 +234,7 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
     size_model = font_size_model or legacy_font_model
     if not style_angle_model and not size_model:
         return [{
-            "font_size": config.DEFAULT_FONT_SIZE,
+            "font_size": _FALLBACK_FONT_SIZE,
             "angle": 0,
             "font_style": "standard",
             "font_char_ratio": None,
@@ -233,7 +251,7 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
         getattr(legacy_font_model, "checkpoint_path", None),
     )
     transform = transforms.Compose([
-        Letterbox(config.IMAGE_SIZE),
+        Letterbox(_FONT_MODEL_INPUT_SIZE),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -319,18 +337,18 @@ def _predict_font_properties(font_appearance_model, font_size_model, legacy_font
                 size_target_kind = getattr(size_model, "size_target_kind", "legacy_ratio")
                 if size_target_kind == "stroke_width_ratio":
                     font_stroke_ratio = _resolve_char_ratio(size_model, pred_size_values[j], batch_items[j], item_page_height)
-                    heuristic_gain = float(getattr(config, "FONT_STROKE_RATIO_TO_FONT_SIZE_GAIN", 7.5))
+                    heuristic_gain = _STROKE_RATIO_FONT_SIZE_GAIN
                     reference_height = max(batch_items[j]["crop"].height, 1)
                     font_size = max(1, int(round(font_stroke_ratio * reference_height * heuristic_gain)))
                 elif size_target_kind in {"char_height_ratio", "glyph_height_ratio"}:
                     font_char_ratio = _resolve_char_ratio(size_model, pred_size_values[j], batch_items[j], item_page_height)
-                    heuristic_gain = float(getattr(config, "FONT_CHAR_RATIO_TO_FONT_SIZE_GAIN", 1.18))
+                    heuristic_gain = _CHAR_RATIO_FONT_SIZE_GAIN
                     reference_height = max(batch_items[j]["crop"].height, 1)
                     font_size = max(1, int(round(font_char_ratio * reference_height * heuristic_gain)))
                 else:
                     font_size = _resolve_font_size(size_model, pred_size_values[j], batch_items[j], item_page_height)
             else:
-                font_size = config.DEFAULT_FONT_SIZE
+                font_size = _FALLBACK_FONT_SIZE
 
             all_props.append({
                 "font_size": font_size,

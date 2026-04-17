@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 LINE_HEAD_FORBIDDEN = set(")]}ã€‰ã€‹ã€ã€ã€‘ã€ã€‚ï¼Œï¼ï¼Ÿâ€¦â‹¯:;")
 LINE_TAIL_FORBIDDEN = set("([<{ã€ˆã€Šã€Œã€Žã€")
 
+# Internal layout heuristics (not user-tunable; changing these alters wrap strategy and oversample).
+_VERTICAL_TOLERANCE_RATIO = 0.05
+_DEFAULT_TEXT_OVERSAMPLE = 2
+_SMALL_TEXT_OVERSAMPLE = 3
+_TALL_BUBBLE_RATIO = 1.8
+_TALL_BUBBLE_MIN_CHARS = 8
+
 
 @dataclass(frozen=True)
 class TextRenderPlan:
@@ -184,25 +191,25 @@ def resolve_bubble_style(element, bubble_box, target_width, target_height):
     bubble_ratio = bubble_height / bubble_width
     density = _text_density(element.translated_text)
 
-    style = replace(base_style, oversample_scale=max(base_style.oversample_scale, config.DEFAULT_TEXT_OVERSAMPLE))
+    style = replace(base_style, oversample_scale=max(base_style.oversample_scale, _DEFAULT_TEXT_OVERSAMPLE))
     target_scale = style.horizontal_scale
     target_letter_spacing = style.letter_spacing
     target_line_spacing = style.line_spacing
     embolden = style.embolden
     oversample = style.oversample_scale
 
-    if bubble_ratio >= config.TALL_BUBBLE_RATIO and density >= config.TALL_BUBBLE_MIN_CHARS:
+    if bubble_ratio >= _TALL_BUBBLE_RATIO and density >= _TALL_BUBBLE_MIN_CHARS:
         target_scale = min(target_scale, 0.90)
         target_letter_spacing = min(target_letter_spacing, -0.8)
         target_line_spacing = max(target_line_spacing, 1.22)
-        oversample = max(oversample, config.DEFAULT_TEXT_OVERSAMPLE)
+        oversample = max(oversample, _DEFAULT_TEXT_OVERSAMPLE)
 
     if min(target_width, target_height) <= 70 or element.font_size <= config.MIN_READABLE_TEXT_SIZE:
         target_scale = max(target_scale, 0.92)
         target_letter_spacing = max(target_letter_spacing, -0.25)
         target_line_spacing = max(target_line_spacing, 1.16)
         embolden = True
-        oversample = max(oversample, config.SMALL_TEXT_OVERSAMPLE)
+        oversample = max(oversample, _SMALL_TEXT_OVERSAMPLE)
 
     return replace(
         style,
@@ -222,7 +229,7 @@ def resolve_freeform_style(element, box_width, box_height):
             horizontal_scale=max(style.horizontal_scale, 0.95),
             letter_spacing=max(style.letter_spacing, -0.1),
             embolden=True,
-            oversample_scale=max(style.oversample_scale, config.SMALL_TEXT_OVERSAMPLE),
+            oversample_scale=max(style.oversample_scale, _SMALL_TEXT_OVERSAMPLE),
         )
     return style
 
@@ -396,7 +403,7 @@ def _score_wrapped_candidate(
     if len(lines) > 1:
         edge_avg = (line_widths[0] + line_widths[-1]) / 2
         middle_max = max(line_widths[1:-1], default=max(line_widths))
-        if bubble_ratio >= config.TALL_BUBBLE_RATIO:
+        if bubble_ratio >= _TALL_BUBBLE_RATIO:
             score -= max(0.0, edge_avg - middle_max) / max(target_width, 1) * 12.0
         else:
             score -= np.std(line_widths) / max(target_width, 1) * 4.0
@@ -557,7 +564,7 @@ def _select_fixed_size_wrap(
     width_ratios = [1.0, 0.9]
     if bubble_ratio <= 0.9:
         width_ratios.extend([0.82, 0.72])
-    elif bubble_ratio >= config.TALL_BUBBLE_RATIO:
+    elif bubble_ratio >= _TALL_BUBBLE_RATIO:
         width_ratios.extend([0.78, 0.66, 0.56])
     elif bubble_ratio >= 1.2:
         width_ratios.extend([0.84, 0.74])
@@ -628,7 +635,7 @@ def _find_best_fit_font(
     width_ratios = [1.0, 0.9]
     if bubble_ratio <= 0.9:
         width_ratios.extend([0.82, 0.72])
-    elif bubble_ratio >= config.TALL_BUBBLE_RATIO:
+    elif bubble_ratio >= _TALL_BUBBLE_RATIO:
         width_ratios.extend([0.78, 0.66, 0.56])
     elif bubble_ratio >= 1.2:
         width_ratios.extend([0.84, 0.74])
@@ -762,7 +769,7 @@ def _fit_text(element, target_width, target_height, font_path, style):
         wrapped_text, font_size = _find_best_fit_font_vertical(
             element.translated_text, element.font_size,
             box_width,
-            box_height * (1 + config.VERTICAL_TOLERANCE_RATIO),
+            box_height * (1 + _VERTICAL_TOLERANCE_RATIO),
             font_path,
             style,
             char_ratio_target=char_ratio_target,
@@ -789,7 +796,7 @@ def _fit_text(element, target_width, target_height, font_path, style):
         vertical_wrapped, vertical_size = _find_best_fit_font_vertical(
             element.translated_text, element.font_size,
             box_width,
-            box_height * (1 + config.VERTICAL_TOLERANCE_RATIO),
+            box_height * (1 + _VERTICAL_TOLERANCE_RATIO),
             font_path,
             style,
             char_ratio_target=char_ratio_target,
@@ -849,7 +856,7 @@ def plan_freeform_text(element, bubble_text_rects, img_size, font_path, style):
     box_width = element.text_box[2] - element.text_box[0]
     box_height = element.text_box[3] - element.text_box[1]
     target_width = box_width * (1.0 - (config.FREEFORM_PADDING_RATIO * 2))
-    target_height = box_height * (1 + config.VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
+    target_height = box_height * (1 + _VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
     wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
 
     text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)

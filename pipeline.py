@@ -59,6 +59,15 @@ class MangaTranslationPipeline:
             return
 
         pages_to_process = ckpt.get_pass2_remaining_pages(all_page_data) if ckpt else all_page_data
+        if ckpt:
+            remaining_names = {page.source_page for page in pages_to_process}
+            skipped_pages = [page for page in all_page_data if page.source_page not in remaining_names]
+        else:
+            skipped_pages = []
+
+        if skipped_pages:
+            self._emit_skipped_pages(skipped_pages, all_page_data)
+
         if pages_to_process:
             self._inpaint_and_draw_streaming(pages_to_process, image_paths, ckpt)
         else:
@@ -69,6 +78,41 @@ class MangaTranslationPipeline:
 
         self.callback(ProgressEvent(PipelinePhase.COMPLETE, 1, 1, "모든 프로세스 완료"))
         logger.info("모든 프로세스 완료.")
+
+    def _emit_skipped_pages(self, skipped_pages, all_page_data):
+        """체크포인트로 Pass 2가 스킵된 페이지도 갤러리에 보이도록 디스크에서 로드해 이벤트 발행.
+
+        디스크의 이전 결과 이미지를 그대로 clean으로 취급한다 (사용자가 outputs를
+        수동으로 지우지 않은 이상 파이프라인은 그 상태를 유지).
+        """
+        total = len(all_page_data)
+        for page_data in skipped_pages:
+            output_path = os.path.join(self.output_dir, page_data.source_page)
+            if not os.path.exists(output_path):
+                continue
+            image_bgr = cv2.imread(output_path)
+            if image_bgr is None:
+                continue
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+            debug_overlay_rgb = image_rgb.copy()
+            self._draw_debug_boxes(debug_overlay_rgb, page_data)
+
+            index = all_page_data.index(page_data) + 1
+            self.callback(ProgressEvent(
+                PipelinePhase.PASS2_PAGE,
+                index,
+                total,
+                f"{page_data.source_page} (이전 결과 재사용)",
+                page_name=page_data.source_page,
+                image_rgb=image_rgb,
+                extras={
+                    "bubbles": len(page_data.speech_bubbles),
+                    "freeform": len(page_data.freeform_texts),
+                    "debug_image_rgb": debug_overlay_rgb,
+                    "restored_from_disk": True,
+                },
+            ))
 
     def _ensure_inpainting_model(self):
         """Pass 2 렌더링에 필요한 Inpainting 모델만 로드합니다."""

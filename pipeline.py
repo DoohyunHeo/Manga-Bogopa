@@ -79,12 +79,15 @@ class MangaTranslationPipeline:
         self.callback(ProgressEvent(PipelinePhase.LOADING_MODELS, 1, 1, "Inpainting 모델 로딩 완료"))
 
     def _build_pass2_service(self) -> Pass2Stage:
-        """Pass 2 실행 책임을 전달하는 서비스를 구성합니다."""
+        """Pass 2 실행 책임을 전달하는 서비스를 구성합니다.
+
+        debug_box_drawer는 항상 제공하고, 실제 디스크 저장은 클린 이미지만 한다.
+        UI 쪽에서 오버레이 표시 여부를 토글한다.
+        """
         return Pass2Stage(
             models=self.models,
             output_dir=self.output_dir,
             progress_callback=self.callback,
-            debug_draw_boxes=config.DRAW_DEBUG_BOXES,
             debug_box_drawer=self._draw_debug_boxes,
             ensure_inpainting_model=self._ensure_inpainting_model,
         )

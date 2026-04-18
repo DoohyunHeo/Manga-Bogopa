@@ -199,13 +199,12 @@ def _validate_run_inputs(input_folder: str):
     return cleaned, None
 
 
-def _apply_run_settings(input_folder, output_folder, yolo_threshold, batch_size, draw_debug):
+def _apply_run_settings(input_folder, output_folder, yolo_threshold, batch_size):
     """설정 저장 단일 진입점 — 번역 탭의 즉석 변경도 여기서만 반영."""
     c = config._config
     c.INPUT_DIR = input_folder
     c.YOLO_CONF_THRESHOLD = float(yolo_threshold)
     c.TRANSLATION_BATCH_SIZE = int(batch_size)
-    c.DRAW_DEBUG_BOXES = bool(draw_debug)
     if output_folder and output_folder.strip():
         c.OUTPUT_DIR = output_folder.strip()
     config.save()
@@ -258,9 +257,34 @@ def _build_output_artifacts(output_dir: str):
     return json_path, zip_path
 
 
+# ---------------------------------------------------------------------------
+# 갤러리 상태 — 디버그 오버레이 토글을 위해 per-page 3종 이미지 유지
+# ---------------------------------------------------------------------------
+
+_GALLERY_STATE: dict = {"pages": []}  # each: {"orig","trans","debug","name"}
+
+
+def _render_gallery(show_debug: bool):
+    """현재 _GALLERY_STATE를 토글 상태에 맞춰 갤러리 리스트로 변환."""
+    rendered = []
+    for page in _GALLERY_STATE["pages"]:
+        if page["orig"] is not None:
+            rendered.append((page["orig"], f"원본 — {page['name']}"))
+        chosen = page["debug"] if (show_debug and page["debug"] is not None) else page["trans"]
+        label_prefix = "번역+탐지" if (show_debug and page["debug"] is not None) else "번역"
+        rendered.append((chosen, f"{label_prefix} — {page['name']}"))
+    return rendered
+
+
+def _toggle_debug_view(show_debug: bool):
+    """UI 토글 change 이벤트 — 갤러리만 다시 그림."""
+    rendered = _render_gallery(bool(show_debug))
+    return rendered if rendered else gr.update()
+
+
 def _process_images(
     input_folder, output_folder,
-    yolo_threshold, batch_size, draw_debug, enable_checkpoint,
+    yolo_threshold, batch_size, show_debug, enable_checkpoint,
 ):
     cleaned_folder, error = _validate_run_inputs(input_folder)
     if error:
@@ -268,7 +292,7 @@ def _process_images(
         yield gr.update(), gr.update(), gr.update(), error
         return
 
-    _apply_run_settings(cleaned_folder, output_folder, yolo_threshold, batch_size, draw_debug)
+    _apply_run_settings(cleaned_folder, output_folder, yolo_threshold, batch_size)
     resolved_output = output_folder.strip() if output_folder and output_folder.strip() else None
 
     input_files = {
@@ -276,7 +300,7 @@ def _process_images(
         for f in os.listdir(cleaned_folder)
     }
 
-    gallery_images = []   # 스트리밍용 — 완료된 페이지를 순차 추가
+    _GALLERY_STATE["pages"] = []
     output_dir = None
     log_lines = []
 
@@ -289,10 +313,14 @@ def _process_images(
         if event.phase == PipelinePhase.PASS2_PAGE and event.image_rgb is not None:
             page_name = event.page_name or f"Page {event.current}"
             orig_rgb = _load_original_image(input_files, page_name)
-            if orig_rgb is not None:
-                gallery_images.append((orig_rgb, f"원본 — {page_name}"))
-            gallery_images.append((event.image_rgb.copy(), f"번역 — {page_name}"))
-            gallery_update = list(gallery_images)
+            debug_rgb = (event.extras or {}).get("debug_image_rgb")
+            _GALLERY_STATE["pages"].append({
+                "orig": orig_rgb,
+                "trans": event.image_rgb.copy(),
+                "debug": debug_rgb.copy() if debug_rgb is not None else None,
+                "name": page_name,
+            })
+            gallery_update = _render_gallery(bool(show_debug))
 
         if event.phase == PipelinePhase.COMPLETE and event.page_name and os.path.isdir(event.page_name):
             output_dir = event.page_name
@@ -300,9 +328,10 @@ def _process_images(
         yield (gallery_update, gr.update(), gr.update(), "\n".join(log_lines))
 
     json_path, zip_path = _build_output_artifacts(output_dir)
+    final_gallery = _render_gallery(bool(show_debug))
 
     yield (
-        gallery_images if gallery_images else gr.update(),
+        final_gallery if final_gallery else gr.update(),
         json_path, zip_path,
         "\n".join(log_lines),
     )
@@ -354,8 +383,6 @@ def build_ui() -> gr.Blocks:
                                                      info="말풍선·텍스트 탐지 최소 신뢰도. 낮추면 더 많이 잡히지만 오탐 증가")
                                 run_batch = gr.Number(value=c.TRANSLATION_BATCH_SIZE, label="번역 배치 크기", precision=0,
                                                       info="한 번에 처리할 페이지 수. VRAM 부족 시 줄이세요")
-                                run_debug = gr.Checkbox(value=c.DRAW_DEBUG_BOXES, label="탐지 영역 시각화",
-                                                        info="결과에 말풍선·텍스트 탐지 박스를 색상별로 표시")
                                 run_ckpt = gr.Checkbox(value=True, label="체크포인트 활성화",
                                                        info="중단 후 재실행 시 완료된 페이지를 건너뜀")
                             run_btn = gr.Button("번역 시작", variant="primary", size="lg")
@@ -366,6 +393,11 @@ def build_ui() -> gr.Blocks:
                                 json_dl = gr.File(label="번역 데이터 (JSON)", interactive=False)
                                 zip_dl = gr.File(label="결과 이미지 (ZIP)", interactive=False)
 
+                    show_debug_toggle = gr.Checkbox(
+                        value=False,
+                        label="탐지 영역 표시",
+                        info="말풍선·텍스트 탐지 박스를 갤러리에 겹쳐 보여줍니다. 저장되는 이미지 파일엔 영향 없음",
+                    )
                     gallery = gr.Gallery(label="번역 결과 (왼쪽: 원본 / 오른쪽: 번역본)",
                                          columns=2, height="auto", object_fit="contain")
 
@@ -373,8 +405,13 @@ def build_ui() -> gr.Blocks:
                     output_browse.click(fn=_pick_folder, inputs=[output_folder], outputs=[output_folder])
                     run_btn.click(
                         fn=_process_images,
-                        inputs=[input_folder, output_folder, run_yolo, run_batch, run_debug, run_ckpt],
+                        inputs=[input_folder, output_folder, run_yolo, run_batch, show_debug_toggle, run_ckpt],
                         outputs=[gallery, json_dl, zip_dl, translate_status],
+                    )
+                    show_debug_toggle.change(
+                        fn=_toggle_debug_view,
+                        inputs=[show_debug_toggle],
+                        outputs=[gallery],
                     )
                     translate_status.change(
                         fn=None, inputs=None, outputs=None,
@@ -594,11 +631,6 @@ def build_ui() -> gr.Blocks:
                                              label="글씨체 판정 확신도 임계값",
                                              info="말풍선 밖 글자는 대부분 나레이션/효과음이라, 모델이 이 확신도 미만으로 글씨체를 집어내면 자동으로 나레이션 글씨체로 처리"),
                                    'FREEFORM_STYLE_MIN_CONFIDENCE', float)
-
-                    with gr.Accordion("디버그", open=False):
-                        reg.setter(gr.Checkbox(value=c.DRAW_DEBUG_BOXES, label="탐지 영역 시각화",
-                                               info="결과 이미지에 말풍선(빨강), 텍스트(초록), 말풍선 밖 텍스트(파랑) 박스를 표시"),
-                                   'DRAW_DEBUG_BOXES', bool)
 
                     save_settings_btn = gr.Button("설정 저장", variant="primary")
                     settings_result = gr.Textbox(label="결과", interactive=False)

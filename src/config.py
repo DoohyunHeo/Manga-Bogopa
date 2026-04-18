@@ -166,9 +166,6 @@ class PipelineConfig:
     MAX_FONT_SIZE: int = 80
     FONT_AREA_FILL_RATIO: float = 0.35
 
-    # ── 디버그 ──
-    DRAW_DEBUG_BOXES: bool = False
-
 
     @property
     def DEFAULT_FONT_PATH(self) -> str:

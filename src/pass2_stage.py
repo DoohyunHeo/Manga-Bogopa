@@ -23,14 +23,12 @@ class Pass2Stage:
         models,
         output_dir: str,
         progress_callback: Optional[ProgressCallback] = None,
-        debug_draw_boxes: bool = False,
         debug_box_drawer: Optional[Callable[[np.ndarray, PageData], None]] = None,
         ensure_inpainting_model: Optional[Callable[[], None]] = None,
     ):
         self.models = models
         self.output_dir = output_dir
         self.callback = progress_callback or noop_callback
-        self.debug_draw_boxes = debug_draw_boxes
         self.debug_box_drawer = debug_box_drawer
         self.ensure_inpainting_model = ensure_inpainting_model
 
@@ -72,12 +70,17 @@ class Pass2Stage:
                 page_started_at = time.perf_counter()
                 final_image_rgb = page_drawer.draw_text_on_image(inpainted_image, page_data)
 
-                if self.debug_draw_boxes and self.debug_box_drawer:
-                    self.debug_box_drawer(final_image_rgb, page_data)
-
+                # Clean image goes to disk (no debug boxes ever).
                 output_path = os.path.join(self.output_dir, page_data.source_page)
                 final_image_bgr = cv2.cvtColor(final_image_rgb, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(output_path, final_image_bgr)
+
+                # Debug overlay is only for the UI — rendered on a copy so the
+                # file on disk is untouched. UI can toggle which version to show.
+                debug_overlay_rgb = None
+                if self.debug_box_drawer is not None:
+                    debug_overlay_rgb = final_image_rgb.copy()
+                    self.debug_box_drawer(debug_overlay_rgb, page_data)
 
                 completed_pages += 1
                 page_elapsed = time.perf_counter() - page_started_at
@@ -93,6 +96,7 @@ class Pass2Stage:
                         extras={
                             "bubbles": len(page_data.speech_bubbles),
                             "freeform": len(page_data.freeform_texts),
+                            "debug_image_rgb": debug_overlay_rgb,
                         },
                     )
                 )

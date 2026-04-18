@@ -20,7 +20,7 @@ from src.text_fitting import (
     find_best_fit_font_vertical,
     get_char_ratio_target,
 )
-from src.text_renderer import DEFAULT_STYLES, FREEFORM_STYLE, TextStyle, measure_text
+from src.text_renderer import DEFAULT_STYLES, FREEFORM_STYLE, TextStyle, measure_text, measure_vertical_text
 from src.text_wrapping import TALL_BUBBLE_MIN_CHARS, TALL_BUBBLE_RATIO, text_density
 from src.utils import rects_intersect
 
@@ -261,7 +261,13 @@ def plan_freeform_text(element, bubble_text_rects, img_size, font_path, style):
     target_height = box_height * (1 + _VERTICAL_TOLERANCE_RATIO) if box_width <= box_height else box_height
     wrapped_text, font_size, vertical = _fit_text(element, target_width, target_height, font_path, style)
 
-    text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
+    # Vertical text renders as a character stack; its actual w/h differs from
+    # the horizontal measure result (width ≈ one glyph, height ≈ sum of glyphs).
+    if vertical:
+        text_w, text_h = measure_vertical_text(wrapped_text, font_path, font_size, style)
+    else:
+        text_w, text_h = measure_text(wrapped_text, font_path, font_size, style)
+
     x1, y1, x2, y2 = element.text_box
     if vertical:
         center_y = (y1 + y2) / 2

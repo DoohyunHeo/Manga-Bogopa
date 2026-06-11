@@ -1,0 +1,330 @@
+import json
+import os
+from dataclasses import dataclass, field, fields
+from typing import Dict, Tuple
+
+import torch
+
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+
+# JSON 직렬화에서 제외할 필드
+# - DEVICE: 런타임 환경(GPU/CPU)에서 자동 결정
+# - FONT_*_ENABLED / *_RATIO / *_WEIGHT / *_THRESHOLD / TTA_* 등 "파생 필드":
+#   apply_font_modes()가 고수준 모드에서 자동 재계산하므로 JSON에 넣지 않는다.
+_EXCLUDED_FIELDS = {
+    "DEVICE",
+    # 크기 보정 모드에서 파생
+    "FONT_SIZE_CORRECTION_ENABLED",
+    "FONT_CHAR_FIT_ENABLED",
+    "FONT_CHAR_SCORE_WEIGHT",
+    # 허용 오차에서 파생
+    "MODEL_FONT_SIZE_FLOOR_RATIO",
+    "MODEL_FONT_SIZE_CEILING_RATIO",
+    # 스타일 폴백 모드에서 파생
+    "FONT_STYLE_FALLBACK_ENABLED",
+    "FONT_STYLE_LOW_CONFIDENCE_THRESHOLD",
+    "FONT_STYLE_LOW_MARGIN_THRESHOLD",
+    "FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD",
+    # TTA 모드에서 파생
+    "FONT_MODEL_TTA_ENABLED",
+    "FONT_MODEL_TTA_VARIANTS",
+}
+
+
+@dataclass
+class PipelineConfig:
+    """파이프라인 전체 설정을 관리하는 데이터 클래스"""
+
+    # ── API ──
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3-flash-preview"
+    # "default": 모델 기본값 / "low": 빠르게 / "high": 깊게 (Gemini 3 계열 전용)
+    GEMINI_THINKING_LEVEL: str = "default"
+    # 배치 간 맥락 유지를 위해 기억할 최근 대화(요청+응답) 쌍 수
+    TRANSLATION_MAX_HISTORY_EXCHANGES: int = 6
+    SYSTEM_PROMPT: str = ""
+
+    # ── 디렉토리 ──
+    INPUT_DIR: str = "data/inputs/"
+    OUTPUT_DIR: str = "data/outputs"
+    # ── 모델 경로 ──
+    MODEL_PATH: str = "data/models/MangaTextExtractor-V2.pt"
+    FONT_APPEARANCE_MODEL_PATH: str = "data/models/font_appearance_analyzer.pth"
+    FONT_STYLE_MODEL_PATH: str = "data/models/font_style_analyzer.pth"
+
+    # ── 디바이스 (런타임, JSON 제외) ──
+    DEVICE: str = field(default_factory=lambda: "cuda" if torch.cuda.is_available() else "cpu")
+
+    # ── 탐지 설정 ──
+    YOLO_CONF_THRESHOLD: float = 0.35
+    TEXT_MERGE_OVERLAP_THRESHOLD: float = 0.2
+    # 탐지 모델이 학습된 해상도(1344)로 추론해야 작은 글자까지 제대로 잡힌다.
+    DETECTION_IMGSZ: int = 1344
+    DETECTION_BATCH_SIZE: int = 8
+    DETECTION_HALF: bool = True
+
+    # ── 배치 크기 ──
+    TRANSLATION_BATCH_SIZE: int = 50
+    OCR_BATCH_SIZE: int = 16
+    OCR_NUM_BEAMS: int = 2
+    OCR_PREFER_LOCAL_FILES: bool = True
+    OCR_WARMUP_ON_LOAD: bool = False
+    FONT_MODEL_BATCH_SIZE: int = 16
+    FONT_MODEL_TTA_ENABLED: bool = True
+    FONT_MODEL_TTA_VARIANTS: int = 3
+    INPAINT_BATCH_SIZE: int = 8
+    PASS1_IMAGE_LOAD_WORKERS: int = 4
+    PASS1_EMPTY_CACHE_EVERY_N_BATCHES: int = 0
+    PASS2_MICROBATCH_SIZE: int = 4
+    PASS2_IMAGE_LOAD_WORKERS: int = 4
+    PASS2_EMPTY_CACHE_EVERY_N_BATCHES: int = 0
+
+    # ── 말풍선 레이아웃 ──
+    BUBBLE_EDGE_SAFE_MARGIN: int = 10
+    # 0.15는 양쪽 30%를 깎고 시작해 한국어 번역문이 과하게 줄어드는 주원인이었음
+    BUBBLE_PADDING_RATIO: float = 0.10
+    ATTACHED_BUBBLE_TEXT_MARGIN: int = 5
+
+    # ── 패널 테두리 붙음 감지 ──
+    BUBBLE_ATTACHMENT_EDGE_RATIO: float = 0.10
+    BUBBLE_ATTACHMENT_MIN_LENGTH_RATIO: float = 0.8
+    FREEFORM_ATTACHMENT_SEARCH_PX: int = 100
+    FREEFORM_ATTACHMENT_MIN_LENGTH_RATIO: float = 0.7
+    FREEFORM_ATTACHMENT_TEXT_MARGIN: int = 5
+
+    # ── 프리텍스트 스타일 처리 ──
+    # 프리텍스트는 만화 본문 밖의 나레이션/효과음 계열이라 "standard"가 사실상 나레이션으로 쓰임.
+    # 신뢰도가 이 값 미만이거나 standard로 판정되면 narration으로 치환.
+    FREEFORM_STYLE_MIN_CONFIDENCE: float = 0.70
+
+    # ── 후리가나 컬럼 제거 (세로 일본어 전용) ──
+    # 메인 한자 옆 좁은 후리가나(읽기용 작은 글자) 컬럼이 폰트 크기 예측을 흐릴 수 있어
+    # 폰트 모델 입력 크롭에서만 잘라낸다. OCR 입력엔 영향 없음.
+    VERTICAL_FURIGANA_STRIP_ENABLED: bool = True
+    VERTICAL_FURIGANA_MIN_GAP_RATIO: float = 0.08
+
+    # ── 인페인팅 ──
+    # "manga": 만화/애니메이션 특화 LaMa (권장) / "photo": 범용 big-lama
+    INPAINT_MODEL: str = "manga"
+    INPAINT_MANGA_MODEL_PATH: str = "data/models/anime_lama/lama_large_512px.ckpt"
+    INPAINT_CONTEXT_PADDING: int = 50
+    # 말풍선 밖 글자 지울 영역 확장 (px)
+    INPAINT_MASK_PADDING: int = 3
+    # 말풍선 안 글자 지울 영역 확장 (px) — 글자 잔상이 남으면 검은 노이즈가 생기므로
+    # 넉넉하게 잡는다. 말풍선 테두리는 침범하지 않도록 자동 보호된다.
+    INPAINT_BUBBLE_MASK_PADDING: int = 8
+
+    # ── 텍스트 렌더링 ──
+    ENABLE_VERTICAL_TEXT: bool = True
+    VERTICAL_TEXT_THRESHOLD: int = 4
+    VERTICAL_FORCE_ASPECT_RATIO: float = 6.0
+    MIN_ROTATION_ANGLE: int = 2
+    FONT_SHRINK_THRESHOLD_RATIO: float = 0.75
+
+    # 글씨 크기는 잉크 기하 측정(glyph_metrics)으로 산출한다.
+    # 측정 불가 시 휴리스틱(크롭 높이 70%) 폴백.
+
+    # ── 폰트 크기 보정 모드 (고수준) ──
+    # "off"  : 측정 크기 그대로 사용 (테스트/디버깅용)
+    # "light": 원본 글자 비율을 가볍게 참고
+    # "strong": 원본 글자 비율을 강하게 반영 (실용 기본값)
+    FONT_SIZE_CORRECTION_MODE: str = "strong"
+    MODEL_FONT_SIZE_TOLERANCE: float = 0.2  # ±20% (대칭 허용 오차)
+
+    # ── 스타일 폴백 모드 (고수준) ──
+    # "off"   : 모델 예측 무조건 사용
+    # "loose" : 신뢰도가 매우 낮을 때만 폴백
+    # "strict": 엄격한 신뢰도 기준 (실용 기본값)
+    FONT_STYLE_FALLBACK_MODE: str = "strict"
+
+    # ── TTA 모드 (고수준) ──
+    # "off"      : TTA 비활성화
+    # "fast"     : 2회 변형 평균
+    # "accurate" : 3회 변형 평균 (실용 기본값)
+    FONT_MODEL_TTA_MODE: str = "accurate"
+
+    # ── 보정 모드에서 파생되는 저수준 값 (자동 계산, 직접 수정 X) ──
+    MODEL_FONT_SIZE_FLOOR_RATIO: float = 0.8
+    MODEL_FONT_SIZE_CEILING_RATIO: float = 1.2
+    FONT_SIZE_CORRECTION_ENABLED: bool = False
+    FONT_CHAR_FIT_ENABLED: bool = True
+    FONT_CHAR_SCORE_WEIGHT: float = 42.0
+    FONT_STYLE_FALLBACK_ENABLED: bool = True
+    FONT_STYLE_LOW_CONFIDENCE_THRESHOLD: float = 0.24
+    FONT_STYLE_LOW_MARGIN_THRESHOLD: float = 0.04
+    FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD: float = 0.55
+    MIN_READABLE_TEXT_SIZE: int = 16
+
+    # ── 말풍선 밖 텍스트 ──
+    FREEFORM_PADDING_RATIO: float = 0.05
+    # 가로쓰기 프리텍스트가 탐지 박스보다 이 비율만큼 더 넓게/높게 퍼지는 것을 허용
+    # (탐지 박스가 빠듯해 한국어 번역문이 들어가며 글씨가 너무 작아지는 것 방지)
+    FREEFORM_BOX_OVERFLOW_RATIO: float = 0.2
+    FREEFORM_FONT_COLOR: Tuple[int, int, int] = (0, 0, 0)
+    FREEFORM_STROKE_COLOR: Tuple[int, int, int] = (255, 255, 255)
+    FREEFORM_STROKE_WIDTH: int = 2
+
+    # ── 폰트 ──
+    FONT_DIR: str = "data/fonts"
+    FONT_MAP: Dict[str, str] = field(default_factory=lambda: {
+        "pop": "data/fonts/SDSamliphopangcheTTFOutline.ttf",
+        "angry": "data/fonts/a몬스터.ttf",
+        "cute": "data/fonts/IM_Hyemin-Bold.ttf",
+        "embarrassment": "data/fonts/JejuHallasan.ttf",
+        "handwriting": "data/fonts/NanumPen.ttf",
+        "narration": "data/fonts/NanumMyeongjo-Bold.ttf",
+        "scared": "data/fonts/흔적체.ttf",
+        "shouting": "data/fonts/Pretendard-ExtraBold.otf",
+        "standard": "data/fonts/Pretendard-SemiBold.otf"
+    })
+
+    # ── 폰트 설정 ──
+    MIN_FONT_SIZE: int = 5
+    MAX_FONT_SIZE: int = 80
+    FONT_AREA_FILL_RATIO: float = 0.35
+
+
+    @property
+    def DEFAULT_FONT_PATH(self) -> str:
+        return self.FONT_MAP.get("standard", "")
+
+    def __post_init__(self):
+        if self.MIN_FONT_SIZE >= self.MAX_FONT_SIZE:
+            raise ValueError(f"MIN_FONT_SIZE({self.MIN_FONT_SIZE}) must be < MAX_FONT_SIZE({self.MAX_FONT_SIZE})")
+        self.apply_font_modes()
+
+    def apply_font_modes(self):
+        """고수준 모드(FONT_SIZE_CORRECTION_MODE 등) → 저수준 값으로 파생."""
+        # 1) 폰트 크기 보정 모드 — 원본 글자 비율(char ratio)을 얼마나 강하게 반영할지
+        mode = str(self.FONT_SIZE_CORRECTION_MODE or "strong").lower()
+        if mode == "off":
+            self.FONT_SIZE_CORRECTION_ENABLED = False
+            self.FONT_CHAR_FIT_ENABLED = False
+        elif mode == "light":
+            self.FONT_SIZE_CORRECTION_ENABLED = True
+            self.FONT_CHAR_FIT_ENABLED = True
+            self.FONT_CHAR_SCORE_WEIGHT = 25.0
+        else:  # "strong"
+            self.FONT_SIZE_CORRECTION_ENABLED = True
+            self.FONT_CHAR_FIT_ENABLED = True
+            self.FONT_CHAR_SCORE_WEIGHT = 42.0
+
+        # 2) 모델 크기 허용 오차 (대칭)
+        tol = max(0.05, min(0.5, float(self.MODEL_FONT_SIZE_TOLERANCE)))
+        self.MODEL_FONT_SIZE_FLOOR_RATIO = round(1.0 - tol, 3)
+        self.MODEL_FONT_SIZE_CEILING_RATIO = round(1.0 + tol, 3)
+
+        # 3) 스타일 폴백 모드
+        fb_mode = str(self.FONT_STYLE_FALLBACK_MODE or "strict").lower()
+        if fb_mode == "off":
+            self.FONT_STYLE_FALLBACK_ENABLED = False
+        elif fb_mode == "loose":
+            self.FONT_STYLE_FALLBACK_ENABLED = True
+            self.FONT_STYLE_LOW_CONFIDENCE_THRESHOLD = 0.15
+            self.FONT_STYLE_LOW_MARGIN_THRESHOLD = 0.02
+            self.FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD = 0.40
+        else:  # "strict"
+            self.FONT_STYLE_FALLBACK_ENABLED = True
+            self.FONT_STYLE_LOW_CONFIDENCE_THRESHOLD = 0.24
+            self.FONT_STYLE_LOW_MARGIN_THRESHOLD = 0.04
+            self.FONT_STYLE_EXPRESSIVE_PROB_THRESHOLD = 0.55
+
+        # 4) TTA 모드
+        tta_mode = str(self.FONT_MODEL_TTA_MODE or "accurate").lower()
+        if tta_mode == "off":
+            self.FONT_MODEL_TTA_ENABLED = False
+            self.FONT_MODEL_TTA_VARIANTS = 1
+        elif tta_mode == "fast":
+            self.FONT_MODEL_TTA_ENABLED = True
+            self.FONT_MODEL_TTA_VARIANTS = 2
+        else:  # "accurate"
+            self.FONT_MODEL_TTA_ENABLED = True
+            self.FONT_MODEL_TTA_VARIANTS = 3
+
+    # ── JSON 저장/로드 ──
+
+    def to_dict(self) -> dict:
+        """JSON 직렬화 가능한 딕셔너리로 변환합니다. 런타임 전용 필드는 제외."""
+        d = {}
+        for f in fields(self):
+            if f.name in _EXCLUDED_FIELDS:
+                continue
+            val = getattr(self, f.name)
+            # tuple → list (JSON 호환)
+            if isinstance(val, tuple):
+                val = list(val)
+            d[f.name] = val
+        return d
+
+    def save(self, path: str = None):
+        """설정을 JSON 파일로 저장합니다."""
+        path = path or CONFIG_PATH
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+
+    def update_from_dict(self, d: dict):
+        """딕셔너리에서 값을 로드하여 현재 설정에 반영합니다."""
+        for f in fields(self):
+            if f.name in d and f.name not in _EXCLUDED_FIELDS:
+                val = d[f.name]
+                # list → tuple 복원
+                current = getattr(self, f.name)
+                if isinstance(current, tuple) and isinstance(val, list):
+                    val = tuple(val)
+                setattr(self, f.name, val)
+        # 저수준 값이 JSON에 있더라도 고수준 모드 기준으로 다시 파생한다
+        self.apply_font_modes()
+
+
+def _load_config() -> PipelineConfig:
+    """config.json이 있으면 로드, 없으면 기본값으로 생성합니다."""
+    cfg = PipelineConfig()
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        cfg.update_from_dict(data)
+    else:
+        # 첫 실행: prompt.txt가 있으면 내용을 SYSTEM_PROMPT로 마이그레이션
+        prompt_path = os.path.join(os.path.dirname(CONFIG_PATH), "prompt.txt")
+        if os.path.exists(prompt_path):
+            with open(prompt_path, 'r', encoding='utf-8') as f:
+                cfg.SYSTEM_PROMPT = f.read()
+        cfg.save()
+    return cfg
+
+
+# 싱글톤 인스턴스
+_config = _load_config()
+
+
+def is_configured() -> bool:
+    """API 키가 설정되어 있는지 확인합니다."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if api_key:
+        return True
+    return bool(_config.GEMINI_API_KEY.strip())
+
+
+def get_api_key() -> str:
+    """API 키를 반환합니다. 환경변수 우선."""
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    return env_key if env_key else _config.GEMINI_API_KEY.strip()
+
+
+def save():
+    """현재 설정을 JSON 파일로 저장합니다."""
+    _config.save()
+
+
+def reload():
+    """config.json에서 설정을 다시 로드합니다."""
+    global _config
+    _config = _load_config()
+
+
+def __getattr__(name):
+    """모듈 레벨에서 config.CONSTANT_NAME 접근을 지원합니다."""
+    try:
+        return getattr(_config, name)
+    except AttributeError:
+        raise AttributeError(f"module 'src.config' has no attribute '{name}'")

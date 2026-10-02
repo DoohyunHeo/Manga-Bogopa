@@ -1,0 +1,29 @@
+# IDE
+.idea/
+/shelf/
+/workspace.xml
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+
+# Project secrets & data
+config.json
+config.json.bak
+library.json
+translation_data.json
+/data
+/ModelTrain
+/runs
+/scripts
+
+# Web screen sources build into web/dist (committed); the toolchain stays local
+web/frontend/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

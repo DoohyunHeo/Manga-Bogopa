@@ -1,0 +1,29 @@
+# Core ML/DL
+torch==2.9.1
+torchvision==0.24.1
+timm==1.0.22
+ultralytics==8.4.36
+
+# OCR (번역 CLI인 Antigravity CLI·Claude Code·Codex CLI는 pip 패키지 아님)
+manga-ocr
+transformers==4.57.1
+sentencepiece==0.2.1
+
+# Inpainting (만화 특화 LaMa는 src/lama_ffc.py + HF 자동 다운로드, 아래는 범용 폴백)
+simple-lama-inpainting-updated==0.1.3
+
+# Image Processing
+opencv-python==4.12.0.88
+Pillow==12.0.0
+skia-python>=144.0
+fonttools==4.61.0
+numpy==2.2.6
+
+# Web UI (화면은 web/dist에 빌드해 둔 파일 — Node 없이 돈다)
+fastapi==0.135.3
+uvicorn==0.44.0
+
+# Utilities
+tqdm==4.67.1
+huggingface-hub==0.36.0
+einops==0.8.1
